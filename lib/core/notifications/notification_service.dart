@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 /// Action id used on the "pause enforcement for this visit" button attached
@@ -24,6 +25,7 @@ class NotificationService {
   final _actionStreamController = StreamController<NotificationAction>.broadcast();
 
   Future<void> init() async {
+    if (kIsWeb) return;
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     const initSettings = InitializationSettings(android: androidInit);
     await _plugin.initialize(

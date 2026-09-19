@@ -11,6 +11,9 @@ class MosqueDao extends DatabaseAccessor<AppDatabase> with _$MosqueDaoMixin {
   Stream<List<Mosque>> watchAll() =>
       (select(mosques)..orderBy([(t) => OrderingTerm.asc(t.name)])).watch();
 
+  Future<List<Mosque>> getAll() =>
+      (select(mosques)..orderBy([(t) => OrderingTerm.asc(t.name)])).get();
+
   Future<Mosque?> getById(int id) =>
       (select(mosques)..where((t) => t.id.equals(id))).getSingleOrNull();
 

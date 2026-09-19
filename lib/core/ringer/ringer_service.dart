@@ -1,100 +1,115 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sound_mode_advanced/sound_mode_advanced.dart';
 
-/// What actually happened when a ringer change was attempted. Callers use
-/// this to decide whether a notification is warranted — an earlier version
-/// returned nothing and so announced "ringer restored" even when it had
-/// changed nothing at all.
 enum RingerActionResult {
-  /// The ringer mode was really changed.
   changed,
-
-  /// The phone was already in the desired mode; nothing was touched.
   alreadyInDesiredState,
-
-  /// Do Not Disturb access is missing, so nothing could be done.
   noPermission,
-
-  /// The app never silenced this phone (or the user changed the mode
-  /// themselves afterwards), so restoring is not ours to do.
   notOurs,
 }
 
-/// Controls the Android ringer mode around a masjid visit.
+/// Clean Auto-Vibrate RingerService — Built From Scratch.
 ///
-/// Every operation reads the *real* current ringer mode first rather than
-/// trusting an internal flag, so the app never claims to have changed
-/// something it did not, and never overwrites a mode the user set by hand.
+/// Uses [SoundMode] plugin to switch phone to VIBRATE mode when inside
+/// a mosque boundary, and restores to NORMAL when outside.
+/// Persists silence state across app restarts so reopening the app inside
+/// a mosque maintains the vibrate state correctly.
 class RingerService {
-  static const _prefsPreviousModeKey = 'ringer_service_previous_mode';
   static const _prefsSilencedByAppKey = 'ringer_service_silenced_by_app';
+  bool _silencedByUs = false;
+  bool _initialized = false;
 
+  Future<void> _init() async {
+    if (_initialized) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _silencedByUs = prefs.getBool(_prefsSilencedByAppKey) ?? false;
+      _initialized = true;
+    } catch (_) {}
+  }
+
+  /// Check if the app has DND (Do Not Disturb) access permission.
   Future<bool> hasDoNotDisturbAccess() async {
-    final granted = await PermissionHandler.permissionsGranted;
-    return granted ?? false;
+    try {
+      return await PermissionHandler.permissionsGranted ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> openDoNotDisturbSettings() =>
-      PermissionHandler.openDoNotDisturbSetting();
+  /// Open system DND settings so user can grant permission.
+  Future<void> openDoNotDisturbSettings() async {
+    try {
+      await PermissionHandler.openDoNotDisturbSetting();
+    } catch (_) {}
+  }
 
-  Future<RingerModeStatus> currentMode() => SoundMode.ringerModeStatus;
-
-  /// True when the app currently believes it is the reason the phone is
-  /// silent. Used by the UI to show honest status.
+  /// Returns true if this app is the one that changed the ringer mode.
   Future<bool> silencedByApp() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_prefsSilencedByAppKey) ?? false;
+    await _init();
+    return _silencedByUs;
   }
 
-  /// Silences the phone, remembering the mode it was in first.
-  ///
-  /// If the phone is *already* silent this deliberately does nothing and
-  /// records nothing: silencing an already-silent phone would otherwise
-  /// store "silent" as the mode to restore later, leaving the phone stuck
-  /// on silent forever.
+  /// Returns the current ringer mode status.
+  Future<RingerModeStatus?> currentMode() async {
+    try {
+      final mode = await SoundMode.ringerModeStatus;
+      return mode;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Set phone to VIBRATE mode (Pure Vibrate — No DND, No Silent).
   Future<RingerActionResult> silenceForPrayer() async {
-    if (!await hasDoNotDisturbAccess()) return RingerActionResult.noPermission;
+    await _init();
+    try {
+      // Check current mode first
+      final mode = await SoundMode.ringerModeStatus;
 
-    final current = await SoundMode.ringerModeStatus;
-    if (current == RingerModeStatus.silent) {
-      return RingerActionResult.alreadyInDesiredState;
+      // Already in vibrate — no change needed
+      if (mode == RingerModeStatus.vibrate) {
+        _silencedByUs = true;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_prefsSilencedByAppKey, true);
+        return RingerActionResult.alreadyInDesiredState;
+      }
+
+      // Set to vibrate
+      await SoundMode.setSoundMode(RingerModeStatus.vibrate);
+      _silencedByUs = true;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_prefsSilencedByAppKey, true);
+      return RingerActionResult.changed;
+    } catch (_) {
+      return RingerActionResult.noPermission;
     }
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsPreviousModeKey, current.name);
-    await prefs.setBool(_prefsSilencedByAppKey, true);
-
-    await SoundMode.setSoundMode(RingerModeStatus.silent);
-    return RingerActionResult.changed;
   }
 
-  /// Restores the mode that was active before [silenceForPrayer].
-  ///
-  /// Refuses to act unless this app is the one that silenced the phone AND
-  /// the phone is still silent — if the user un-silenced it themselves in
-  /// the meantime, their choice wins.
+  /// Restore phone to NORMAL ringer mode.
   Future<RingerActionResult> restorePreviousMode() async {
-    final prefs = await SharedPreferences.getInstance();
-    final silencedByApp = prefs.getBool(_prefsSilencedByAppKey) ?? false;
-    if (!silencedByApp) return RingerActionResult.notOurs;
+    await _init();
+    if (!_silencedByUs) return RingerActionResult.notOurs;
 
-    if (!await hasDoNotDisturbAccess()) return RingerActionResult.noPermission;
+    try {
+      final mode = await SoundMode.ringerModeStatus;
 
-    final current = await SoundMode.ringerModeStatus;
-    if (current != RingerModeStatus.silent) {
-      // The user took control; drop our claim without touching anything.
+      // Already normal — nothing to restore
+      if (mode == RingerModeStatus.normal) {
+        _silencedByUs = false;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_prefsSilencedByAppKey, false);
+        return RingerActionResult.alreadyInDesiredState;
+      }
+
+      // Restore to normal
+      await SoundMode.setSoundMode(RingerModeStatus.normal);
+      _silencedByUs = false;
+      final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_prefsSilencedByAppKey, false);
-      return RingerActionResult.notOurs;
+      return RingerActionResult.changed;
+    } catch (_) {
+      return RingerActionResult.noPermission;
     }
-
-    final storedName = prefs.getString(_prefsPreviousModeKey);
-    final previous = RingerModeStatus.values.firstWhere(
-      (mode) => mode.name == storedName,
-      orElse: () => RingerModeStatus.normal,
-    );
-
-    await SoundMode.setSoundMode(previous);
-    await prefs.setBool(_prefsSilencedByAppKey, false);
-    return RingerActionResult.changed;
   }
 }

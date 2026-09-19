@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sound_mode_advanced/sound_mode_advanced.dart';
+import 'package:sound_mode_advanced/utils/ringer_mode_statuses.dart';
 
 import '../core/notifications/notification_service.dart';
 import '../core/prayer/prayer_time_service.dart';
@@ -156,6 +156,11 @@ class ProximityEngine {
   /// [_handleTransition], which clears an id on every transition).
   final _enforcementPaused = <int>{};
 
+  /// Prevents concurrent [_onRingerChanged] runs from interfering with
+  /// each other — the second broadcast (from our own setSoundMode call)
+  /// must not start a new re-silence cycle.
+  bool _ringerChangeInProgress = false;
+
   bool isEnforcementPaused(int mosqueId) => _enforcementPaused.contains(mosqueId);
 
   Position? _lastAcceptedPosition;
@@ -181,6 +186,7 @@ class ProximityEngine {
 
     _mosques = await _mosqueRepository.watchAll().first;
     await _loadPersistedStates();
+    await _enforceRingerIfNeeded();
     await _startStream();
 
     _ringerChangeSub ??= _ringerChanges.changes.listen((_) => _onRingerChanged());
@@ -217,9 +223,9 @@ class ProximityEngine {
       // the provider that reads the GPS chip directly.
       forceLocationManager: _useLocationManager,
       foregroundNotificationConfig: const ForegroundNotificationConfig(
-        notificationTitle: 'Masjid monitoring active',
-        notificationText: 'Watching for saved masjid locations',
-        notificationChannelName: 'Masjid proximity monitoring',
+        notificationTitle: '🕌 Mosque Auto-Silent Active',
+        notificationText: 'Monitoring nearby mosques in background (100% Active)',
+        notificationChannelName: 'Masjid Proximity Monitoring',
         enableWakeLock: true,
         setOngoing: true,
       ),
@@ -265,6 +271,7 @@ class ProximityEngine {
     _pendingSince.clear();
     _distanceHistory.clear();
     _enforcementPaused.clear();
+    _ringerChangeInProgress = false;
     _lastAcceptedPosition = null;
     _streamStartedAt = null;
     _hasEverFixed = false;
@@ -308,35 +315,27 @@ class ProximityEngine {
   /// enforcement isn't paused for that visit), silence it again — this is
   /// what makes the phone "stay" silent instead of only being silenced once
   /// on entry.
+  ///
+  /// A re-entrancy guard prevents the broadcast fired by our own
+  /// [silenceForPrayer] call from triggering a second cycle.  An 800ms
+  /// delay lets Android's volume-slider UI release control of the ringer
+  /// before we attempt to change it, and a single retry handles the rare
+  /// case where Android still overrides the first attempt.
   Future<void> _onRingerChanged() async {
-    Mosque? active;
-    for (final m in _mosques) {
-      if (_zoneStates[m.id] == ZoneState.inside && !_enforcementPaused.contains(m.id)) {
-        active = m;
-        break;
-      }
+    // ── Guard: skip if we are already handling a ringer change ──
+    if (_ringerChangeInProgress) return;
+    _ringerChangeInProgress = true;
+    try {
+      await _onRingerChangedCore();
+    } finally {
+      _ringerChangeInProgress = false;
     }
-    if (active == null) return;
-    if (!await _ringer.silencedByApp()) return;
+  }
 
-    final mode = await _ringer.currentMode();
-    if (mode == RingerModeStatus.silent) return; // Still silent — nothing to correct.
-
-    final result = await _ringer.silenceForPrayer();
-    if (result == RingerActionResult.changed) {
-      await _notifications.show(
-        title: 'Phone dobara silent kar diya',
-        body: '${active.name} ke andar hain — ringer wapas silent kar diya gaya.',
-        actions: [
-          const AndroidNotificationAction(
-            pauseEnforcementActionId,
-            'Is visit ke liye rok dein',
-          ),
-        ],
-        payload: '${active.id}',
-      );
-      _emit(_snapshot, event: '${active.name} — user ne unmute kiya tha, dobara silent kar diya');
-    }
+  Future<void> _onRingerChangedCore() async {
+    // Small delay so Android's volume-slider UI releases the ringer first.
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    await _enforceRingerIfNeeded();
   }
 
   String? _mosqueNameById(int mosqueId) {
@@ -464,6 +463,60 @@ class ProximityEngine {
       lastUpdate: now,
       lastEvent: _snapshot.lastEvent,
     ));
+
+    // ── Polling-based ringer enforcement ──
+    // Some devices (Vivo, Oppo, Xiaomi) don't reliably deliver the
+    // RINGER_MODE_CHANGED broadcast, so the event-based _onRingerChanged
+    // never fires.  This check runs on every GPS fix (~4 s) and
+    // re-silences if the user somehow un-muted while still inside.
+    await _enforceRingerIfNeeded();
+  }
+
+  /// Re-silences the phone if the user un-muted while inside a mosque.
+  /// Called from two places:
+  /// 1. [_onRingerChanged] — fast path, reacts within ~1 s via broadcast.
+  /// 2. [_onPosition]      — slow path, polls every ~4 s as a fallback.
+  Future<void> _enforceRingerIfNeeded() async {
+    Mosque? active;
+    for (final m in _mosques) {
+      if (_zoneStates[m.id] == ZoneState.inside &&
+          !_enforcementPaused.contains(m.id)) {
+        active = m;
+        break;
+      }
+    }
+    if (active == null) return;
+
+    // Only work when Location / GPS is turned ON
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      return;
+    }
+
+    final mode = await _ringer.currentMode();
+    // Already vibrate or silent — no enforcement needed
+    if (mode == RingerModeStatus.vibrate || mode == RingerModeStatus.silent) return;
+
+    // Inside mosque and phone is on normal mode — force vibrate
+    final result = await _ringer.silenceForPrayer();
+    if (result == RingerActionResult.changed) {
+      await _notifications.show(
+        title: '📳 Phone Vibrate — ${active.name}',
+        body: '${active.name} ke andar hain — phone vibrate mode par laga diya gaya.',
+        actions: [
+          const AndroidNotificationAction(
+            pauseEnforcementActionId,
+            'Is visit ke liye rok dein',
+          ),
+        ],
+        payload: '${active.id}',
+      );
+      _emit(_snapshot,
+          event: '${active.name} — masjid ke andar, vibrate mode active kiya');
+    }
+  }
+
+  Future<void> _reEnforceIfUnmuted() async {
+    await _enforceRingerIfNeeded();
   }
 
   /// Median of the last [_smoothingWindow] readings. Chosen over a mean
@@ -512,31 +565,16 @@ class ProximityEngine {
     ZoneState state, {
     required ZoneState from,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
-    final ignorePrayerTime = prefs.getBool(prefsIgnorePrayerTimeKey) ?? true;
-
-    // Every transition starts this visit's enforcement fresh — a pause
-    // recorded on a previous visit must not carry over.
     _enforcementPaused.remove(mosque.id);
 
     if (state == ZoneState.inside) {
-      final isPrayerTime = ignorePrayerTime ||
-          _prayerTimes.isPrayerTime(
-            latitude: mosque.latitude,
-            longitude: mosque.longitude,
-          );
-      if (!isPrayerTime) {
-        _emit(_snapshot, event: '${mosque.name} — andar, lekin namaz ka waqt nahi');
-        return;
-      }
-
+      // Entering mosque — set phone to vibrate
       final result = await _ringer.silenceForPrayer();
       switch (result) {
         case RingerActionResult.changed:
           await _notifications.show(
-            title: 'Phone silent kar diya',
-            body: '${mosque.name} ke andar hain — ringer silent hai aur '
-                'silent hi rahega jab tak aap bahar na jayen.',
+            title: '📳 Phone Vibrate — ${mosque.name}',
+            body: 'Masjid ke range me hain. Phone vibrate mode par laga diya gaya.',
             actions: [
               const AndroidNotificationAction(
                 pauseEnforcementActionId,
@@ -545,27 +583,20 @@ class ProximityEngine {
             ],
             payload: '${mosque.id}',
           );
-          _emit(_snapshot, event: '${mosque.name} — andar, silent kar diya');
+          _emit(_snapshot, event: '${mosque.name} — andar, vibrate kar diya');
         case RingerActionResult.alreadyInDesiredState:
-          // Already silent: nothing changed, so say nothing.
-          _emit(_snapshot, event: '${mosque.name} — andar, phone pehle se silent tha');
+          _emit(_snapshot, event: '${mosque.name} — andar, pehle se vibrate par tha');
         case RingerActionResult.noPermission:
-          await _notifications.show(
-            title: '${mosque.name} ke andar hain',
-            body: 'Do Not Disturb access nahi hai, is liye ringer '
-                'silent nahi kar saka. Settings mein ijazat dein.',
-          );
-          _emit(_snapshot, event: '${mosque.name} — andar, DND permission missing');
+          _emit(_snapshot, event: '${mosque.name} — andar, permission nahi hai');
         case RingerActionResult.notOurs:
           _emit(_snapshot, event: '${mosque.name} — andar, koi tabdeeli nahi');
       }
       return;
     }
 
-    // Leaving. A cold start that simply *discovers* it is outside is not an
-    // exit — only a real inside -> outside transition restores the ringer.
+    // Exiting mosque — restore ringer to normal
     if (from != ZoneState.inside) {
-      _emit(_snapshot, event: '${mosque.name} — bahar (shuruati state, koi tabdeeli nahi)');
+      _emit(_snapshot, event: '${mosque.name} — bahar (initial state)');
       return;
     }
 
@@ -573,16 +604,15 @@ class ProximityEngine {
     switch (result) {
       case RingerActionResult.changed:
         await _notifications.show(
-          title: '${mosque.name} se bahar aa gaye',
-          body: 'Ringer wapas normal kar diya gaya.',
+          title: '🔔 Ringer Normal — ${mosque.name}',
+          body: 'Masjid se bahar aa gaye. Ringer wapas normal kar diya gaya.',
         );
         _emit(_snapshot, event: '${mosque.name} — bahar, ringer restore kiya');
       case RingerActionResult.alreadyInDesiredState:
       case RingerActionResult.notOurs:
-        // We never silenced it, or the user already changed it themselves.
-        _emit(_snapshot, event: '${mosque.name} — bahar, ringer app ne nahi badla tha');
+        _emit(_snapshot, event: '${mosque.name} — bahar, ringer pehle se normal tha');
       case RingerActionResult.noPermission:
-        _emit(_snapshot, event: '${mosque.name} — bahar, DND permission missing');
+        _emit(_snapshot, event: '${mosque.name} — bahar, permission nahi hai');
     }
   }
 

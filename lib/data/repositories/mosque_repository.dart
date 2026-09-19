@@ -12,6 +12,8 @@ class MosqueRepository {
 
   Stream<List<Mosque>> watchAll() => _dao.watchAll();
 
+  Future<List<Mosque>> getAll() => _dao.getAll();
+
   Future<Mosque?> getById(int id) => _dao.getById(id);
 
   Future<int> add({
@@ -19,6 +21,8 @@ class MosqueRepository {
     required double latitude,
     required double longitude,
     int radiusMeters = 150,
+    String? supabaseId,
+    String? shareCode,
   }) {
     return _dao.insertMosque(
       MosquesCompanion.insert(
@@ -26,6 +30,8 @@ class MosqueRepository {
         latitude: latitude,
         longitude: longitude,
         radiusMeters: Value(radiusMeters),
+        supabaseId: Value(supabaseId),
+        shareCode: Value(shareCode),
       ),
     );
   }

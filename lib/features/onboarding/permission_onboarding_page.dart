@@ -3,18 +3,6 @@ import 'package:flutter/material.dart';
 import '../../app_scope.dart';
 import '../home/home_page.dart';
 
-/// Requests every permission the background silent-trigger feature needs,
-/// one at a time (Android best practice — bundling requests together
-/// increases rejection rates). Background location must be requested only
-/// after foreground location is already granted.
-///
-/// The "Do Not Disturb access" step in particular does NOT auto-advance
-/// after opening system settings: that intent returns immediately whether
-/// or not the user actually granted anything, and blindly moving on was
-/// the root cause of "notification shows but phone never goes silent" —
-/// the app proceeded assuming access was granted when it wasn't. This page
-/// re-checks on resume and only advances once access is confirmed (or the
-/// user explicitly skips).
 class PermissionOnboardingPage extends StatefulWidget {
   const PermissionOnboardingPage({super.key});
 
@@ -26,7 +14,6 @@ class PermissionOnboardingPage extends StatefulWidget {
 enum _Step {
   foregroundLocation,
   backgroundLocation,
-  doNotDisturb,
   batteryOptimization,
   notifications,
   done,
@@ -36,7 +23,6 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
     with WidgetsBindingObserver {
   _Step _step = _Step.foregroundLocation;
   bool _busy = false;
-  bool? _dndGrantedNow;
 
   @override
   void initState() {
@@ -51,17 +37,7 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _step == _Step.doNotDisturb) {
-      _recheckDnd();
-    }
-  }
-
-  Future<void> _recheckDnd() async {
-    final scope = AppScope.of(context);
-    final granted = await scope.ringer.hasDoNotDisturbAccess();
-    if (mounted) setState(() => _dndGrantedNow = granted);
-  }
+  void didChangeAppLifecycleState(AppLifecycleState state) {}
 
   Future<void> _advance() async {
     final scope = AppScope.of(context);
@@ -73,14 +49,6 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
           setState(() => _step = _Step.backgroundLocation);
         case _Step.backgroundLocation:
           await scope.permissions.requestBackgroundLocation();
-          setState(() => _step = _Step.doNotDisturb);
-        case _Step.doNotDisturb:
-          if (_dndGrantedNow != true) {
-            await scope.ringer.openDoNotDisturbSettings();
-            // Lifecycle callback re-checks when the user returns from
-            // Settings; do not advance from here.
-            return;
-          }
           setState(() => _step = _Step.batteryOptimization);
         case _Step.batteryOptimization:
           if (!await scope.permissions.isIgnoringBatteryOptimizations()) {
@@ -102,56 +70,47 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
     }
   }
 
-  ({String title, String body, String cta}) get _content {
+  ({String title, String body, String cta, IconData icon, Color color}) get _content {
     switch (_step) {
       case _Step.foregroundLocation:
         return (
           title: 'Location Permission',
-          body: 'App ko masjid ke qareeb hone ki tasdeeq karne ke liye '
-              'aapki location chahiye.',
-          cta: 'Location Permission Dein',
+          body: 'The app needs your location to confirm when you are near a mosque. This is required for the app to work properly.',
+          cta: 'Grant Location Permission',
+          icon: Icons.location_on,
+          color: const Color(0xFF10B981),
         );
       case _Step.backgroundLocation:
         return (
-          title: 'Background Location ("Allow all the time")',
-          body: 'Agli screen par "Allow all the time" chunein — is ke bina '
-              'app band hone ke baad masjid ke paas aana detect nahi kar sakega.',
-          cta: 'Background Location Dein',
-        );
-      case _Step.doNotDisturb:
-        final granted = _dndGrantedNow == true;
-        return (
-          title: 'Do Not Disturb Access',
-          body: granted
-              ? 'Do Not Disturb access mil chuki hai — phone silent karna '
-                  'kaam karega. Aage barhein.'
-              : 'Phone ko silent karne ke liye Android "Do Not Disturb" '
-                  'access chahiye. Agli screen par is app ko allow karein — '
-                  'wapas aane par yahan khud check ho jayega. (Kuch phones, '
-                  'jaise Realme/ColorOS, ye permission khud-ba-khud waqt ke '
-                  'sath hata dete hain — agar silent kaam karna band ho jaye '
-                  'to Settings mein dobara check karein.)',
-          cta: granted ? 'Aage Barhein' : 'Settings Kholein',
+          title: 'Background Location',
+          body: 'Select "Allow all the time" on the next screen — without this, the app will not detect when you are near a mosque after it is closed.',
+          cta: 'Grant Background Location',
+          icon: Icons.my_location,
+          color: const Color(0xFFF59E0B),
         );
       case _Step.batteryOptimization:
         return (
-          title: 'Battery Optimization Ignore Karein',
-          body: 'Isse Android app ko background mein sote waqt (Doze mode) '
-              'band karne se rokega.',
-          cta: 'Ijazat Dein',
+          title: 'Battery Optimization',
+          body: 'This prevents Android from closing the app in the background while sleeping (Doze mode). Be sure to "Allow".',
+          cta: 'Grant Permission',
+          icon: Icons.battery_charging_full,
+          color: const Color(0xFF10B981),
         );
       case _Step.notifications:
         return (
           title: 'Notifications',
-          body: 'Masjid ke paas aane/jaane par alert dikhane ke liye '
-              'notification permission chahiye.',
-          cta: 'Notification Permission Dein',
+          body: 'Notification permission is required to show alerts when entering/leaving near a mosque.',
+          cta: 'Grant Notification Permission',
+          icon: Icons.notifications_active,
+          color: const Color(0xFFF59E0B),
         );
       case _Step.done:
         return (
-          title: 'Tayyar!',
-          body: 'Saari permissions set ho gayi hain.',
-          cta: 'Aage Barhein',
+          title: 'Ready!',
+          body: 'All permissions have been set up. The app is ready to use.',
+          cta: 'Let\'s Begin',
+          icon: Icons.check_circle,
+          color: const Color(0xFF10B981),
         );
     }
   }
@@ -159,55 +118,104 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
   @override
   Widget build(BuildContext context) {
     final content = _content;
-    final stepIndex = _Step.values.indexOf(_step) + 1;
-    final onDndStep = _step == _Step.doNotDisturb;
+    final totalSteps = _Step.values.length;
+    final currentStepIndex = _Step.values.indexOf(_step);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Setup')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('Step $stepIndex / ${_Step.values.length}',
-                style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: 12),
-            Text(content.title, style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 12),
-            Text(content.body),
-            if (onDndStep) ...[
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Icon(
-                    _dndGrantedNow == true ? Icons.check_circle : Icons.error_outline,
-                    color: _dndGrantedNow == true ? Colors.green : Colors.orange,
-                    size: 18,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF059669), Color(0xFF0D1117)],
+            stops: [0.0, 0.4],
+          ),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(
+                    totalSteps,
+                    (index) => Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                      width: index == currentStepIndex ? 24 : 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: index <= currentStepIndex
+                            ? const Color(0xFF10B981)
+                            : Colors.white24,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
                   ),
-                  const SizedBox(width: 8),
-                  Text(_dndGrantedNow == true ? 'Granted' : 'Abhi tak granted nahi'),
-                  const Spacer(),
-                  TextButton(onPressed: _recheckDnd, child: const Text('Recheck')),
-                ],
-              ),
-              if (_dndGrantedNow != true)
-                TextButton(
-                  onPressed: () => setState(() => _step = _Step.batteryOptimization),
-                  child: const Text('Filhal Skip Karein (baad mein Settings se theek karein)'),
                 ),
-            ],
-            const SizedBox(height: 32),
-            FilledButton(
-              onPressed: _busy ? null : _advance,
-              child: _busy
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Text(content.cta),
+                const SizedBox(height: 64),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(32),
+                        decoration: BoxDecoration(
+                          color: content.color.withValues(alpha: 0.1),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: content.color.withValues(alpha: 0.3), width: 2),
+                        ),
+                        child: Icon(
+                          content.icon,
+                          size: 80,
+                          color: content.color,
+                        ),
+                      ),
+                      const SizedBox(height: 48),
+                      Text(
+                        content.title,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        content.body,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.white70,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                FilledButton(
+                  onPressed: _busy ? null : _advance,
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    backgroundColor: const Color(0xFF10B981),
+                  ),
+                  child: _busy
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : Text(
+                          content.cta,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                ),
+                const SizedBox(height: 24),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
