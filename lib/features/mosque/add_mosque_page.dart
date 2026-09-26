@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../../app_scope.dart';
+import '../../core/auth/auth_service.dart';
+import '../../core/supabase/supabase_service.dart';
 
 class AddMosquePage extends StatefulWidget {
   const AddMosquePage({super.key});
@@ -14,6 +16,7 @@ class AddMosquePage extends StatefulWidget {
 class _AddMosquePageState extends State<AddMosquePage> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
+  final _addressController = TextEditingController();
   double _radius = 40;
   Position? _capturedPosition;
   bool _isCapturing = false;
@@ -26,13 +29,20 @@ class _AddMosquePageState extends State<AddMosquePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _verifyImamRole());
   }
 
+  /// Only an admin-approved imam (signed in) may register a mosque.
+  /// The server enforces this again inside register_mosque().
   Future<void> _verifyImamRole() async {
     final scope = AppScope.of(context);
-    final isImam = await scope.roleService.isImam();
-    if (!isImam && mounted) {
+    final status = await scope.auth.refreshStatus();
+    if (!mounted) return;
+    if (!scope.auth.isSignedIn || status != ImamStatus.approved) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Only Imams can add a new mosque. Users join via Share Code.'),
+        SnackBar(
+          content: Text(
+            !scope.auth.isSignedIn
+                ? 'Masjid sirf Imam account se register hoti hai. Pehle login karein.'
+                : 'Aap ka Imam account abhi admin se approve nahi hua. Approval ke baad masjid register kar sakenge.',
+          ),
           backgroundColor: Colors.orangeAccent,
         ),
       );
@@ -43,6 +53,7 @@ class _AddMosquePageState extends State<AddMosquePage> {
   @override
   void dispose() {
     _nameController.dispose();
+    _addressController.dispose();
     super.dispose();
   }
 
@@ -78,7 +89,7 @@ class _AddMosquePageState extends State<AddMosquePage> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     if (_capturedPosition == null) {
-      setState(() => _error = 'Please capture location first.');
+      setState(() => _error = 'Pehle masjid ke andar khade ho kar location capture karein.');
       return;
     }
 
@@ -89,114 +100,104 @@ class _AddMosquePageState extends State<AddMosquePage> {
 
     final scope = AppScope.of(context);
     try {
-      final name = _nameController.text.trim();
-      final lat = _capturedPosition!.latitude;
-      final lng = _capturedPosition!.longitude;
-      final rad = _radius.round();
-
-      String? cloudId;
-      String? code;
-
-      final isImam = await scope.roleService.isImam();
-      if (isImam) {
-        try {
-          final cloudRes = await scope.supabaseService.uploadMosque(
-            name: name,
-            latitude: lat,
-            longitude: lng,
-            radiusMeters: rad,
-          );
-          cloudId = cloudRes.id;
-          code = cloudRes.shareCode;
-        } catch (_) {
-          // Offline — save locally only
-        }
-      }
-
-      await scope.mosqueRepository.add(
-        name: name,
-        latitude: lat,
-        longitude: lng,
-        radiusMeters: rad,
-        supabaseId: cloudId,
-        shareCode: code,
+      final cloud = await scope.supabaseService.registerMosque(
+        name: _nameController.text.trim(),
+        latitude: _capturedPosition!.latitude,
+        longitude: _capturedPosition!.longitude,
+        radiusMeters: _radius.round(),
+        address: _addressController.text.trim(),
       );
 
-      await scope.proximity.refreshMosques();
+      // Imam's phone also gets the mosque (live view + auto-vibrate).
+      await scope.mosqueRepository.upsertCloud(
+        supabaseId: cloud.id,
+        name: cloud.name,
+        latitude: cloud.latitude,
+        longitude: cloud.longitude,
+        radiusMeters: cloud.radiusMeters,
+        shareCode: cloud.shareCode,
+      );
+      await scope.sync.onLocalMosquesChanged?.call();
+      try {
+        await scope.sync.refreshManaged();
+      } catch (_) {}
 
       if (!mounted) return;
-
-      if (code != null) {
-        await showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) {
-            final theme = Theme.of(ctx);
-            return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              title: Row(
-                children: [
-                  const Icon(Icons.check_circle, color: Color(0xFF10B981), size: 28),
-                  const SizedBox(width: 10),
-                  const Expanded(child: Text('Mosque Created!')),
-                ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Share this code with worshippers:'),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.secondary.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: theme.colorScheme.secondary),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            code!,
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 3,
-                              color: theme.colorScheme.secondary,
-                            ),
+      final code = cloud.shareCode;
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          final theme = Theme.of(ctx);
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Color(0xFF10B981), size: 28),
+                SizedBox(width: 10),
+                Expanded(child: Text('Masjid register ho gayi!')),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Ab ye masjid 10 km tak ke namaziyon ko Masjid Store mein nazar aayegi. '
+                  'Share code bhi de sakte hain:',
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.secondary.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: theme.colorScheme.secondary),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          code,
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 3,
+                            color: theme.colorScheme.secondary,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          icon: const Icon(Icons.copy, size: 20),
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: code!));
-                            ScaffoldMessenger.of(ctx).showSnackBar(
-                              const SnackBar(content: Text('Code copied!')),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 20),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: code));
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text('Code copy ho gaya!')),
+                          );
+                        },
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              actions: [
-                FilledButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('Done'),
                 ),
+                const SizedBox(height: 12),
+                const Text('Agla qadam: jamaat times set karein.', style: TextStyle(fontSize: 13)),
               ],
-            );
-          },
-        );
-      }
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Done'),
+              ),
+            ],
+          );
+        },
+      );
 
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
-      setState(() => _error = 'Could not save: $e');
+      if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
@@ -221,7 +222,7 @@ class _AddMosquePageState extends State<AddMosquePage> {
             ),
           ),
         ),
-        title: const Text('Add Mosque'),
+        title: const Text('Masjid Register Karein'),
       ),
       body: Container(
         decoration: isDark
@@ -259,9 +260,26 @@ class _AddMosquePageState extends State<AddMosquePage> {
                     ),
                     prefixIcon: Icon(Icons.mosque, color: theme.colorScheme.secondary),
                   ),
-                  validator: (v) => (v == null || v.trim().isEmpty) ? 'Enter a name' : null,
+                  validator: (v) => (v == null || v.trim().length < 3) ? 'Masjid ka naam likhein' : null,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
+                TextFormField(
+                  controller: _addressController,
+                  style: TextStyle(color: theme.colorScheme.onSurface),
+                  decoration: InputDecoration(
+                    labelText: 'Address / Muhalla (optional)',
+                    filled: true,
+                    fillColor: isDark ? const Color(0xFF0D1117) : theme.scaffoldBackgroundColor,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    prefixIcon: Icon(Icons.place_outlined, color: theme.colorScheme.secondary),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Location capture karte waqt masjid ke andar (hall ke beech) khade hon.',
+                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+                ),
+                const SizedBox(height: 14),
 
                 // ── Capture Location ──
                 InkWell(
@@ -404,7 +422,7 @@ class _AddMosquePageState extends State<AddMosquePage> {
                         )
                       : const Icon(Icons.save),
                   label: Text(
-                    _isSaving ? 'Saving...' : 'Save Mosque',
+                    _isSaving ? 'Register ho rahi hai...' : 'Masjid Register Karein',
                     style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                   ),
                 ),

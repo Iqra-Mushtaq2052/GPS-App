@@ -4,8 +4,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../app.dart';
 import '../../app_scope.dart';
 import '../../background/proximity_engine.dart';
+import '../../core/auth/auth_service.dart';
 import '../../core/ringer/ringer_service.dart';
-import '../../core/role/role_service.dart';
+import '../auth/imam_auth_page.dart';
+import '../diagnostics/diagnostics_page.dart';
+import '../mosque/mosque_detail_page.dart';
 import '../role/role_selection_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -19,8 +22,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool? _backgroundLocationGranted;
   bool? _batteryOptimizationIgnored;
   bool _ignorePrayerTime = true;
+  bool _notifAnnouncements = true;
+  bool _notifPrayerTimes = true;
   String? _testSilenceResult;
-  AppRole? _currentRole;
   bool _loadStarted = false;
 
   @override
@@ -38,13 +42,23 @@ class _SettingsPageState extends State<SettingsPage> {
     final batteryOk = await scope.permissions.isIgnoringBatteryOptimizations();
     final prefs = await SharedPreferences.getInstance();
     final ignorePrayerTime = prefs.getBool(prefsIgnorePrayerTimeKey) ?? true;
-    final role = await scope.roleService.getRole();
+    final notifAnn = prefs.getBool('pref_notif_announcements') ?? true;
+    final notifPrayer = prefs.getBool('pref_notif_prayer_times') ?? true;
+
+    // Optionally check if imam is signed in to fetch managed mosques
+    if (scope.auth.isSignedIn && scope.auth.isApprovedImam) {
+      if (scope.sync.managedMosques.isEmpty) {
+        scope.sync.refreshManaged();
+      }
+    }
+
     if (mounted) {
       setState(() {
         _backgroundLocationGranted = bgLocation;
         _batteryOptimizationIgnored = batteryOk;
         _ignorePrayerTime = ignorePrayerTime;
-        _currentRole = role;
+        _notifAnnouncements = notifAnn;
+        _notifPrayerTimes = notifPrayer;
       });
     }
   }
@@ -54,8 +68,8 @@ class _SettingsPageState extends State<SettingsPage> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Logout?'),
-        content: const Text('Are you sure you want to log out? You can log in again as Imam or User.'),
+        title: const Text('Sign Out?'),
+        content: const Text('Are you sure you want to log out?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -63,13 +77,15 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Logout', style: TextStyle(color: Colors.redAccent)),
+            child: const Text('Sign Out', style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
     );
 
     if (confirm == true) {
+      await scope.auth.signOut();
+      scope.sync.clearManaged();
       await scope.roleService.logout();
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
@@ -86,19 +102,16 @@ class _SettingsPageState extends State<SettingsPage> {
     if (result == RingerActionResult.changed) {
       await scope.notifications.show(
         title: 'Test: phone silenced',
-        body: 'This is a test notification. Ringer is now silent — '
-            'restore using "Restore Ringer".',
+        body: 'This is a test notification. Ringer is now silent — restore using "Restore Ringer".',
       );
     }
     if (!mounted) return;
     setState(() {
       _testSilenceResult = switch (result) {
         RingerActionResult.changed =>
-          'Success — phone is NOW silent and will stay silent. Check it '
-              'yourself, then press "Restore Ringer".',
+          'Success — phone is NOW silent and will stay silent. Check it yourself, then press "Restore Ringer".',
         RingerActionResult.alreadyInDesiredState =>
-          'Phone was already silent — no changes made. Make the ringer '
-              'normal first, then test.',
+          'Phone was already silent. Make the ringer normal first, then test.',
         RingerActionResult.noPermission =>
           'Failed — there was an issue changing the ringer mode.',
         RingerActionResult.notOurs => 'No changes made.',
@@ -113,15 +126,47 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() {
       _testSilenceResult = switch (result) {
         RingerActionResult.changed => 'Ringer restored to normal.',
-        RingerActionResult.notOurs =>
-          'App did not change the ringer (or you changed it yourself) — '
-              'so nothing was done.',
-        RingerActionResult.alreadyInDesiredState =>
-          'Ringer was already in the correct state.',
-        RingerActionResult.noPermission =>
-          'Failed — there was an issue changing the ringer mode.',
+        RingerActionResult.notOurs => 'App did not change the ringer (or you changed it yourself) — nothing done.',
+        RingerActionResult.alreadyInDesiredState => 'Ringer was already in the correct state.',
+        RingerActionResult.noPermission => 'Failed — issue changing ringer mode.',
       };
     });
+  }
+
+  Widget _buildImamStatusBadge(ImamStatus status) {
+    Color color;
+    String label;
+    switch (status) {
+      case ImamStatus.approved:
+        color = const Color(0xFF10B981);
+        label = 'Approved Imam';
+        break;
+      case ImamStatus.pending:
+        color = const Color(0xFFF59E0B);
+        label = 'Pending Approval';
+        break;
+      case ImamStatus.rejected:
+        color = Colors.redAccent;
+        label = 'Rejected';
+        break;
+      default:
+        color = Colors.grey;
+        label = 'Unknown Status';
+        break;
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+      ),
+    );
   }
 
   @override
@@ -133,127 +178,111 @@ class _SettingsPageState extends State<SettingsPage> {
     final dividerColor = theme.dividerColor;
 
     return Scaffold(
+      backgroundColor: isDark ? const Color(0xFF0D1117) : theme.scaffoldBackgroundColor,
       appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [const Color(0xFF059669), isDark ? Colors.transparent : Colors.white.withValues(alpha: 0.0)],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
-          ),
-        ),
         title: const Text('Settings'),
+        backgroundColor: isDark ? const Color(0xFF0D1117) : theme.colorScheme.surface,
+        elevation: 0,
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // ── Account Section ──
           Padding(
             padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Text('Account Session', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
+            child: Text('Account', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
           ),
-          _GlassCard(
-            child: ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
+          if (scope.auth.isSignedIn)
+            _GlassCard(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.2),
+                          child: Icon(Icons.person, color: theme.colorScheme.primary),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(scope.auth.fullName ?? 'Imam', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                              Text(scope.auth.email ?? '', style: TextStyle(color: subtitleColor, fontSize: 12)),
+                              _buildImamStatusBadge(scope.auth.status),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    if (scope.auth.isApprovedImam)
+                      ListenableBuilder(
+                        listenable: scope.sync,
+                        builder: (context, _) {
+                          return OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(44),
+                              foregroundColor: const Color(0xFF10B981),
+                              side: const BorderSide(color: Color(0xFF10B981)),
+                            ),
+                            icon: const Icon(Icons.mosque),
+                            label: const Text('My Managed Mosques'),
+                            onPressed: () {
+                              final managed = scope.sync.managedMosques;
+                              if (managed.isNotEmpty) {
+                                Navigator.of(context).push(MaterialPageRoute(
+                                  builder: (_) => MosqueDetailPage(cloudMosque: managed.first),
+                                ));
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('No managed mosques found. Pull to refresh home.')),
+                                );
+                              }
+                            },
+                          );
+                        },
+                      ),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.redAccent.withValues(alpha: 0.15),
+                        foregroundColor: Colors.redAccent,
+                        minimumSize: const Size.fromHeight(44),
+                      ),
+                      icon: const Icon(Icons.logout),
+                      label: const Text('Sign Out'),
+                      onPressed: _logout,
+                    ),
+                  ],
                 ),
-                child: Icon(
-                  _currentRole == AppRole.imam ? Icons.mosque : Icons.person,
-                  color: theme.colorScheme.primary,
+              ),
+            )
+          else
+            _GlassCard(
+              child: ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.grey,
+                  child: Icon(Icons.person_outline, color: Colors.white),
                 ),
-              ),
-              title: Text(
-                'Logged in as: ${_currentRole == AppRole.imam ? "Imam" : "User (Namazi)"}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: Text(
-                _currentRole == AppRole.imam
-                    ? 'Can create mosques and update prayer times'
-                    : 'Can join mosques by code and view prayer times',
-                style: TextStyle(color: subtitleColor, fontSize: 12),
-              ),
-              trailing: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.redAccent,
-                  side: const BorderSide(color: Colors.redAccent),
-                ),
-                icon: const Icon(Icons.logout, size: 18),
-                label: const Text('Logout'),
-                onPressed: _logout,
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
-          Padding(
-            padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Text('Permissions', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
-          ),
-          _GlassCard(
-            child: Column(
-              children: [
-                _StatusTile(
-                  title: 'Background Location',
-                  granted: _backgroundLocationGranted,
-                  onFix: () async {
-                    await scope.permissions.requestBackgroundLocation();
+                title: const Text('Not signed in'),
+                subtitle: const Text('Imam or Committee Member?'),
+                trailing: FilledButton(
+                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFFF59E0B)),
+                  child: const Text('Sign in as Imam'),
+                  onPressed: () async {
+                    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ImamAuthPage()));
                     _refreshStatuses();
                   },
                 ),
-                Divider(height: 1, color: dividerColor),
-                _StatusTile(
-                  title: 'Battery Optimization Ignored',
-                  granted: _batteryOptimizationIgnored,
-                  onFix: () async {
-                    await scope.permissions.requestIgnoreBatteryOptimizations();
-                    _refreshStatuses();
-                  },
-                ),
-              ],
+              ),
             ),
-          ),
           const SizedBox(height: 24),
-          Padding(
-            padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Text('Security & Privacy', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
-          ),
-          _GlassCard(
-            child: Column(
-              children: [
-                ListTile(
-                  leading: Icon(Icons.security, color: theme.colorScheme.primary),
-                  title: const Text('GPS Location Privacy', style: TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(
-                    '100% On-Device Guarantee — Your GPS coordinates are processed locally in RAM and are NEVER sent or saved to any server.',
-                    style: TextStyle(color: subtitleColor, fontSize: 12),
-                  ),
-                  trailing: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF10B981).withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      '100% Private',
-                      style: TextStyle(color: Color(0xFF10B981), fontSize: 11, fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ),
-                Divider(height: 1, color: dividerColor),
-                ListTile(
-                  leading: Icon(Icons.lock_outline, color: theme.colorScheme.secondary),
-                  title: const Text('Imam Share Code Security', style: TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(
-                    'All Mosque share codes use 6-character encrypted keys with cloud row-level security (RLS).',
-                    style: TextStyle(color: subtitleColor, fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
+
+          // ── Theme Section ──
           Padding(
             padding: const EdgeInsets.only(left: 8, bottom: 8),
             child: Text('Appearance', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
@@ -278,6 +307,10 @@ class _SettingsPageState extends State<SettingsPage> {
                     listenable: themeNotifier,
                     builder: (context, _) {
                       return SegmentedButton<ThemeMode>(
+                        style: SegmentedButton.styleFrom(
+                          selectedForegroundColor: Colors.white,
+                          selectedBackgroundColor: const Color(0xFF10B981),
+                        ),
                         segments: const [
                           ButtonSegment(
                             value: ThemeMode.light,
@@ -307,92 +340,175 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(height: 24),
+
+          // ── Notifications Section ──
           Padding(
             padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Text('Testing', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
+            child: Text('Notifications', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
           ),
           _GlassCard(
             child: Column(
               children: [
-                ListTile(
-                  leading: Icon(Icons.volume_off, color: theme.colorScheme.secondary),
-                  title: const Text('Test Silence Now', style: TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(
-                    _testSilenceResult ??
-                        'Test silent-mode permission now without waiting for range. '
-                            'Phone will stay silent until you restore it yourself.',
-                    style: TextStyle(
-                      color: _testSilenceResult != null ? theme.colorScheme.secondary : subtitleColor,
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      OutlinedButton(
-                        onPressed: _restoreRinger,
-                        child: const Text('Restore Ringer'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: _testSilenceNow,
-                        child: const Text('Silence Now'),
-                      ),
-                    ],
-                  ),
+                SwitchListTile(
+                  activeTrackColor: const Color(0xFF10B981).withValues(alpha: 0.5),
+                  secondary: const Icon(Icons.campaign),
+                  title: const Text('Announcements'),
+                  subtitle: const Text('Receive notifications for masjid notices.'),
+                  value: _notifAnnouncements,
+                  onChanged: (val) async {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setBool('pref_notif_announcements', val);
+                    setState(() => _notifAnnouncements = val);
+                  },
                 ),
                 Divider(height: 1, color: dividerColor),
                 SwitchListTile(
-                  title: const Text('Testing Mode: Ignore prayer-time check'),
-                  subtitle: Text(
-                    'When ON, it will silence upon entering the geofence, whether '
-                    'it is prayer time or not — for testing boundary/range only.',
-                    style: TextStyle(color: subtitleColor, fontSize: 12),
-                  ),
-                  value: _ignorePrayerTime,
-                  onChanged: (value) async {
+                  activeTrackColor: const Color(0xFF10B981).withValues(alpha: 0.5),
+                  secondary: const Icon(Icons.access_time),
+                  title: const Text('Prayer Time Updates'),
+                  subtitle: const Text('Receive notifications when jamaat times change.'),
+                  value: _notifPrayerTimes,
+                  onChanged: (val) async {
                     final prefs = await SharedPreferences.getInstance();
-                    await prefs.setBool(prefsIgnorePrayerTimeKey, value);
-                    setState(() => _ignorePrayerTime = value);
+                    await prefs.setBool('pref_notif_prayer_times', val);
+                    setState(() => _notifPrayerTimes = val);
                   },
                 ),
               ],
             ),
           ),
           const SizedBox(height: 24),
+
+          // ── Permissions ──
           Padding(
             padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Text('Information', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
+            child: Text('Permissions', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
+          ),
+          _GlassCard(
+            child: Column(
+              children: [
+                _StatusTile(
+                  title: 'Background Location',
+                  granted: _backgroundLocationGranted,
+                  onFix: () async {
+                    await scope.permissions.requestBackgroundLocation();
+                    _refreshStatuses();
+                  },
+                ),
+                Divider(height: 1, color: dividerColor),
+                _StatusTile(
+                  title: 'Battery Optimization Ignored',
+                  granted: _batteryOptimizationIgnored,
+                  onFix: () async {
+                    await scope.permissions.requestIgnoreBatteryOptimizations();
+                    _refreshStatuses();
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── Testing Section ──
+          Padding(
+            padding: const EdgeInsets.only(left: 8, bottom: 8),
+            child: Text('Testing & Diagnostics', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
+          ),
+          _GlassCard(
+            child: Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: const Icon(Icons.bug_report),
+                title: const Text('Developer & Testing Tools'),
+                children: [
+                  Divider(height: 1, color: dividerColor),
+                  SwitchListTile(
+                    title: const Text('Ignore prayer-time check'),
+                    subtitle: Text(
+                      'Silences upon entry regardless of prayer times.',
+                      style: TextStyle(color: subtitleColor, fontSize: 12),
+                    ),
+                    value: _ignorePrayerTime,
+                    onChanged: (value) async {
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.setBool(prefsIgnorePrayerTimeKey, value);
+                      setState(() => _ignorePrayerTime = value);
+                    },
+                  ),
+                  Divider(height: 1, color: dividerColor),
+                  ListTile(
+                    leading: Icon(Icons.volume_off, color: theme.colorScheme.secondary),
+                    title: const Text('Test Silence Now', style: TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      _testSilenceResult ?? 'Force test silent-mode permission without waiting.',
+                      style: TextStyle(
+                        color: _testSilenceResult != null ? theme.colorScheme.secondary : subtitleColor,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        OutlinedButton(
+                          onPressed: _restoreRinger,
+                          child: const Text('Restore Ringer'),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          onPressed: _testSilenceNow,
+                          child: const Text('Silence Now'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Divider(height: 1, color: dividerColor),
+                  ListTile(
+                    leading: const Icon(Icons.monitor_heart),
+                    title: const Text('Open Diagnostics Page'),
+                    trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiagnosticsPage())),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── About Section ──
+          Padding(
+            padding: const EdgeInsets.only(left: 8, bottom: 8),
+            child: Text('About', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 16)),
           ),
           _GlassCard(
             child: Column(
               children: [
                 ListTile(
-                  leading: Icon(Icons.info_outline, color: theme.colorScheme.primary),
-                  title: const Text('Entry confirmation delay'),
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('Masjid GPS App'),
+                  subtitle: const Text('Version 1.0.0'),
+                ),
+                Divider(height: 1, color: dividerColor),
+                ListTile(
+                  leading: const Icon(Icons.gps_fixed),
+                  title: const Text('GPS Offline Mode'),
                   subtitle: Text(
-                    'GPS can jitter slightly on a small radius (20-60m), so it does '
-                    'not trigger instantly upon entry — it confirms and silences only '
-                    'after continuously staying inside for ~20 seconds.',
+                    'Your GPS coordinates are processed entirely on-device and never sent to servers.',
                     style: TextStyle(color: subtitleColor, fontSize: 12),
                   ),
                 ),
                 Divider(height: 1, color: dividerColor),
                 ListTile(
-                  leading: const Icon(Icons.battery_alert_outlined, color: Colors.redAccent),
-                  title: const Text('Realme / ColorOS phones'),
-                  subtitle: Text(
-                    'These phones aggressively close background apps. Go to Settings > '
-                    'Battery > App Battery Management and turn ON "Allow background '
-                    'activity" and "Allow auto-launch" for this app.',
-                    style: TextStyle(color: subtitleColor, fontSize: 12),
-                  ),
+                  leading: const Icon(Icons.code),
+                  title: const Text('Open Source / GitHub'),
+                  trailing: const Icon(Icons.open_in_new, size: 16),
+                  onTap: () {},
                 ),
               ],
             ),
           ),
+          const SizedBox(height: 32),
         ],
       ),
     );
@@ -448,20 +564,14 @@ class _GlassCard extends StatelessWidget {
     final isDark = theme.brightness == Brightness.dark;
     return Container(
       decoration: BoxDecoration(
-        color: isDark
-            ? theme.colorScheme.surface.withValues(alpha: 0.7)
-            : theme.colorScheme.surface,
+        color: isDark ? theme.colorScheme.surface.withValues(alpha: 0.7) : theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: isDark
-              ? Colors.white.withValues(alpha: 0.05)
-              : Colors.grey.withValues(alpha: 0.15),
+          color: isDark ? Colors.white.withValues(alpha: 0.05) : Colors.grey.withValues(alpha: 0.15),
         ),
         boxShadow: [
           BoxShadow(
-            color: isDark
-                ? Colors.black.withValues(alpha: 0.2)
-                : Colors.black.withValues(alpha: 0.06),
+            color: isDark ? Colors.black.withValues(alpha: 0.2) : Colors.black.withValues(alpha: 0.06),
             blurRadius: 8,
             offset: const Offset(0, 4),
           ),

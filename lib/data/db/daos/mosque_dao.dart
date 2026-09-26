@@ -17,6 +17,12 @@ class MosqueDao extends DatabaseAccessor<AppDatabase> with _$MosqueDaoMixin {
   Future<Mosque?> getById(int id) =>
       (select(mosques)..where((t) => t.id.equals(id))).getSingleOrNull();
 
+  Future<Mosque?> getBySupabaseId(String supabaseId) =>
+      (select(mosques)
+            ..where((t) => t.supabaseId.equals(supabaseId))
+            ..limit(1))
+          .getSingleOrNull();
+
   Future<int> insertMosque(MosquesCompanion entry) =>
       into(mosques).insert(entry);
 

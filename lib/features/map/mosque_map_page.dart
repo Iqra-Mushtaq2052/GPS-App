@@ -4,7 +4,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../app_scope.dart';
-import '../../core/discovery/mosque_discovery_service.dart';
+import '../../core/supabase/supabase_service.dart';
 import '../../data/db/app_database.dart';
 import '../mosque/discover_mosques_page.dart';
 
@@ -20,11 +20,11 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
 
   Position? _currentPosition;
   List<Mosque> _savedMosques = [];
-  List<DiscoveredMosque> _discoveredMosques = [];
+  List<StoreMosque> _discoveredMosques = [];
   bool _isLoading = true;
   String? _errorMessage;
 
-  double _selectedRadiusMeters = 1000; // Default 1km
+  double _selectedRadiusMeters = 5000; // Default 5 km (Masjid Store)
 
   @override
   void initState() {
@@ -80,11 +80,10 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
     if (!mounted) return;
     final scope = AppScope.of(context);
     try {
-      final discovered = await scope.discovery.fetchNearbyMosques(
+      final discovered = await scope.supabaseService.nearbyMosques(
         latitude: lat,
         longitude: lng,
-        radiusMeters: radiusMeters,
-        savedMosques: saved,
+        radiusKm: radiusMeters / 1000,
       );
 
       if (mounted) {
@@ -95,27 +94,20 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
     } catch (_) {}
   }
 
-  Future<void> _saveDiscoveredMosque(DiscoveredMosque dm) async {
+  Future<void> _saveDiscoveredMosque(StoreMosque dm) async {
     final scope = AppScope.of(context);
     try {
-      await scope.mosqueRepository.add(
-        name: dm.name,
-        latitude: dm.latitude,
-        longitude: dm.longitude,
-        radiusMeters: 40,
-      );
-      await scope.proximity.refreshMosques();
+      await scope.sync.downloadMosque(dm);
       final updatedSaved = await scope.mosqueRepository.getAll();
 
       if (mounted) {
         setState(() {
           _savedMosques = updatedSaved;
-          dm.isSaved = true;
         });
         Navigator.of(context).pop(); // Close bottom sheet
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✅ Added "${dm.name}" to Auto-Silent!'),
+            content: Text('✅ "${dm.name}" download ho gayi — live connected!'),
             backgroundColor: const Color(0xFF10B981),
             behavior: SnackBarBehavior.floating,
           ),
@@ -124,7 +116,7 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save: $e')),
+          SnackBar(content: Text('Download nahi hui: ${friendlyCloudError(e)}')),
         );
       }
     }
@@ -153,8 +145,9 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
       return dist <= _selectedRadiusMeters;
     }).toList();
 
+    final downloadedIds = _savedMosques.map((m) => m.supabaseId).whereType<String>().toSet();
     final filteredDiscoveredMosques = _discoveredMosques.where((d) {
-      if (d.isSaved) return false;
+      if (downloadedIds.contains(d.id)) return false;
       if (_currentPosition == null) return d.distanceMeters <= _selectedRadiusMeters;
       final dist = Geolocator.distanceBetween(
         _currentPosition!.latitude,
@@ -178,11 +171,11 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
             ),
           ),
         ),
-        title: const Text('Mosques & Geofence Map'),
+        title: const Text('Masjid Map'),
         actions: [
           IconButton(
             icon: const Icon(Icons.explore),
-            tooltip: 'Discover Mosques List',
+            tooltip: 'Masjid Store',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const DiscoverMosquesPage()),
             ),
@@ -241,7 +234,7 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                       mapController: _mapController,
                       options: MapOptions(
                         initialCenter: initialCenter,
-                        initialZoom: _selectedRadiusMeters <= 1000 ? 15.5 : 14.0,
+                        initialZoom: _selectedRadiusMeters <= 5000 ? 13.5 : 12.5,
                       ),
                       children: [
                         TileLayer(
@@ -382,7 +375,7 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                                                     children: [
                                                       Text(dm.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                                                       Text(
-                                                        '${(dm.distanceMeters).round()}m away (OpenStreetMap)',
+                                                        '${(dm.distanceMeters / 1000).toStringAsFixed(1)} km • Masjid Store • ${dm.followerCount} followers',
                                                         style: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.6), fontSize: 13),
                                                       ),
                                                     ],
@@ -400,8 +393,8 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                                                   padding: const EdgeInsets.symmetric(vertical: 14),
                                                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                                                 ),
-                                                icon: const Icon(Icons.add_location_alt),
-                                                label: const Text('Add to Auto-Silent List', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                                icon: const Icon(Icons.download),
+                                                label: const Text('Download & Connect', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                                               ),
                                             ),
                                           ],
@@ -464,7 +457,7 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                                   ),
                                 ),
                                 const SizedBox(width: 4),
-                                const Text('Saved', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                const Text('Meri', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                                 const SizedBox(width: 8),
                                 Container(
                                   width: 10,
@@ -475,13 +468,13 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                                   ),
                                 ),
                                 const SizedBox(width: 4),
-                                const Text('Nearby', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                const Text('Store', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                               ],
                             ),
 
                             // 1 km / 3 km Radius Chips for Map
                             Row(
-                              children: [1000.0, 3000.0].map((rad) {
+                              children: [5000.0, 10000.0].map((rad) {
                                 final isSelected = _selectedRadiusMeters == rad;
                                 final label = rad >= 1000 ? '${(rad / 1000).round()} km' : '${rad.round()}m';
                                 return Padding(
@@ -501,7 +494,7 @@ class _MosqueMapPageState extends State<MosqueMapPage> {
                                         );
                                         _mapController.move(
                                           LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                                          rad <= 1000 ? 15.5 : 14.0,
+                                          rad <= 5000 ? 13.5 : 12.5,
                                         );
                                       }
                                     },

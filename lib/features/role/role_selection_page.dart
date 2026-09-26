@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../app_scope.dart';
 import '../../core/role/role_service.dart';
+import '../auth/imam_auth_page.dart';
 import '../home/home_page.dart';
 import '../onboarding/permission_onboarding_page.dart';
 
@@ -12,29 +13,42 @@ class RoleSelectionPage extends StatefulWidget {
 }
 
 class _RoleSelectionPageState extends State<RoleSelectionPage> {
-  final _roleService = RoleService();
+  bool _busy = false;
 
-  void _selectRole(AppRole role) async {
-    await _roleService.setRole(role);
-    if (!mounted) return;
-    
+  Future<void> _selectRole(AppRole role) async {
+    if (_busy) return;
     final scope = AppScope.of(context);
+
+    if (role == AppRole.imam) {
+      // Imam / committee must sign in first (approval is checked by server).
+      if (!scope.auth.isSignedIn) {
+        final ok = await Navigator.of(context).push<bool>(
+          MaterialPageRoute(builder: (_) => const ImamAuthPage()),
+        );
+        if (ok != true) return;
+      }
+    } else if (scope.auth.isSignedIn) {
+      // Switching back to Namazi: sign out of the management account.
+      await scope.auth.signOut();
+      scope.sync.clearManaged();
+    }
+    if (!mounted) return;
+
+    setState(() => _busy = true);
+    await scope.roleService.setRole(role);
     final foreground = await scope.permissions.hasForegroundLocation();
     final background = await scope.permissions.hasBackgroundLocation();
-
     if (!mounted) return;
+    setState(() => _busy = false);
 
-    if (foreground && background) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (context) => const HomePage()),
-        (route) => false,
-      );
-    } else {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (context) => const PermissionOnboardingPage()),
-        (route) => false,
-      );
-    }
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (context) => (foreground && background)
+            ? const HomePage()
+            : const PermissionOnboardingPage(),
+      ),
+      (route) => false,
+    );
   }
 
   @override
@@ -62,7 +76,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                 ),
                 const SizedBox(height: 16),
                 const Text(
-                  'Welcome to Auto Silent GPS',
+                  'Masjid GPS',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 26,
@@ -72,7 +86,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Login as Imam or User to continue',
+                  'Aap kaun hain? Apna role chunein',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -81,15 +95,15 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                 ),
                 const SizedBox(height: 48),
                 _RoleCard(
-                  title: 'Login as Imam',
-                  subtitle: 'Set and manage prayer times for your mosque. Share the code with your worshippers.',
+                  title: 'Imam / Committee',
+                  subtitle: 'Account se login karein. Admin approval ke baad masjid register karein, jamaat times aur announcements update karein.',
                   icon: Icons.mosque_rounded,
                   onTap: () => _selectRole(AppRole.imam),
                 ),
                 const SizedBox(height: 16),
                 _RoleCard(
-                  title: 'Login as User (Namazi)',
-                  subtitle: 'Auto-silence your phone when you arrive near a mosque.',
+                  title: 'Namazi (User)',
+                  subtitle: 'Login ki zaroorat nahi. Masjid Store se qareeb ki masjidein download karein — live times, announcements aur auto-vibrate.',
                   icon: Icons.person_rounded,
                   onTap: () => _selectRole(AppRole.user),
                 ),

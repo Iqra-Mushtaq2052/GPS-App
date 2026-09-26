@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:drift/drift.dart' as drift;
 import '../../app_scope.dart';
+import 'mosque_detail_page.dart' show formatDateTime;
+import '../../core/supabase/supabase_service.dart';
 import '../../data/db/app_database.dart';
 
 class ImamPrayerTimesPage extends StatefulWidget {
@@ -28,7 +30,8 @@ class _ImamPrayerTimesPageState extends State<ImamPrayerTimesPage> {
   String _asr = '17:00';
   String _maghrib = '18:30';
   String _isha = '20:00';
-  
+  String? _jumuah;
+
   bool _isLoading = true;
   bool _isSaving = false;
   DateTime? _lastUpdated;
@@ -36,37 +39,52 @@ class _ImamPrayerTimesPageState extends State<ImamPrayerTimesPage> {
   @override
   void initState() {
     super.initState();
-    _loadPrayerTimes();
+    // AppScope must not be read synchronously in initState.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPrayerTimes());
+  }
+
+  void _apply(CloudPrayerTimes t) {
+    _fajr = t.fajr;
+    _dhuhr = t.dhuhr;
+    _asr = t.asr;
+    _maghrib = t.maghrib;
+    _isha = t.isha;
+    _jumuah = (t.jumuah == null || t.jumuah!.isEmpty) ? null : t.jumuah;
+    _lastUpdated = t.updatedAt;
   }
 
   Future<void> _loadPrayerTimes() async {
-    final db = AppScope.of(context).database;
-    final prayerTimes = await db.localPrayerTimesDao.getByMosqueId(widget.mosqueId);
-    
-    if (mounted) {
-      setState(() {
-        if (prayerTimes != null) {
-          _fajr = prayerTimes.fajr;
-          _dhuhr = prayerTimes.dhuhr;
-          _asr = prayerTimes.asr;
-          _maghrib = prayerTimes.maghrib;
-          _isha = prayerTimes.isha;
-          _lastUpdated = prayerTimes.updatedAt;
-        }
-        _isLoading = false;
-      });
+    if (!mounted) return;
+    final scope = AppScope.of(context);
+    final cached = scope.sync.timesFor(widget.cloudMosqueId);
+    if (cached != null) setState(() => _apply(cached));
+    try {
+      final fresh = await scope.supabaseService.fetchPrayerTimes(widget.cloudMosqueId);
+      if (fresh != null && mounted) setState(() => _apply(fresh));
+    } catch (_) {
+      // Offline — keep cached values.
     }
+    if (mounted) setState(() => _isLoading = false);
   }
 
   Future<void> _savePrayerTimes() async {
     setState(() => _isSaving = true);
     final scope = AppScope.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    
+
     try {
-      // Save locally
-      final db = scope.database;
-      await db.localPrayerTimesDao.upsert(
+      await scope.supabaseService.updatePrayerTimes(
+        cloudMosqueId: widget.cloudMosqueId,
+        fajr: _fajr,
+        dhuhr: _dhuhr,
+        asr: _asr,
+        maghrib: _maghrib,
+        isha: _isha,
+        jumuah: _jumuah,
+      );
+
+      // Local copy (kept for offline use by the imam's own phone).
+      await scope.database.localPrayerTimesDao.upsert(
         LocalPrayerTimesCompanion(
           mosqueId: drift.Value(widget.mosqueId),
           fajr: drift.Value(_fajr),
@@ -78,27 +96,18 @@ class _ImamPrayerTimesPageState extends State<ImamPrayerTimesPage> {
           updatedAt: drift.Value(DateTime.now()),
         ),
       );
-
-      // Save to Supabase
-      await scope.supabaseService.updatePrayerTimes(
-        cloudMosqueId: widget.cloudMosqueId,
-        fajr: _fajr,
-        dhuhr: _dhuhr,
-        asr: _asr,
-        maghrib: _maghrib,
-        isha: _isha,
-      );
+      await scope.sync.refresh();
 
       if (mounted) {
         setState(() => _lastUpdated = DateTime.now());
         messenger.showSnackBar(
-          const SnackBar(content: Text('Prayer times updated successfully!')),
+          const SnackBar(content: Text('Jamaat times update ho gaye — sab namaziyon ko live pohnch gaye.')),
         );
       }
     } catch (e) {
       if (mounted) {
         messenger.showSnackBar(
-          SnackBar(content: Text('Failed to update prayer times: $e')),
+          SnackBar(content: Text('Update nahi hua: ${friendlyCloudError(e)}')),
         );
       }
     } finally {
@@ -236,12 +245,18 @@ class _ImamPrayerTimesPageState extends State<ImamPrayerTimesPage> {
                   time: _isha,
                   onTap: () => _pickTime(_isha, (t) => _isha = t),
                 ),
+                _TimePickerTile(
+                  name: 'Jumuah (optional)',
+                  time: _jumuah ?? '--:--',
+                  onTap: () => _pickTime(_jumuah ?? '13:30', (t) => _jumuah = t),
+                  onClear: _jumuah == null ? null : () => setState(() => _jumuah = null),
+                ),
                 const SizedBox(height: 32),
                 if (_lastUpdated != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 16),
                     child: Text(
-                      'Last updated: ${_lastUpdated!.toString().substring(0, 16)}',
+                      'Last updated: ${formatDateTime(_lastUpdated!)}',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.grey),
                     ),
@@ -270,11 +285,13 @@ class _TimePickerTile extends StatelessWidget {
   final String name;
   final String time;
   final VoidCallback onTap;
+  final VoidCallback? onClear;
 
   const _TimePickerTile({
     required this.name,
     required this.time,
     required this.onTap,
+    this.onClear,
   });
 
   @override
@@ -283,6 +300,9 @@ class _TimePickerTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
         title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+        leading: onClear == null
+            ? null
+            : IconButton(icon: const Icon(Icons.clear, size: 18), onPressed: onClear),
         trailing: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: BoxDecoration(

@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sound_mode_advanced/utils/ringer_mode_statuses.dart';
 
 import '../core/notifications/notification_service.dart';
-import '../core/prayer/prayer_time_service.dart';
 import '../core/ringer/ringer_change_watcher.dart';
 import '../core/ringer/ringer_service.dart';
 import '../data/db/app_database.dart';
@@ -128,18 +127,15 @@ class ProximityEngine {
     required MosqueRepository mosqueRepository,
     required RingerService ringer,
     required NotificationService notifications,
-    required PrayerTimeService prayerTimes,
     required RingerChangeWatcher ringerChanges,
   })  : _mosqueRepository = mosqueRepository,
         _ringer = ringer,
         _notifications = notifications,
-        _prayerTimes = prayerTimes,
         _ringerChanges = ringerChanges;
 
   final MosqueRepository _mosqueRepository;
   final RingerService _ringer;
   final NotificationService _notifications;
-  final PrayerTimeService _prayerTimes;
   final RingerChangeWatcher _ringerChanges;
 
   StreamSubscription<Position>? _positionSub;
@@ -513,10 +509,6 @@ class ProximityEngine {
       _emit(_snapshot,
           event: '${active.name} — masjid ke andar, vibrate mode active kiya');
     }
-  }
-
-  Future<void> _reEnforceIfUnmuted() async {
-    await _enforceRingerIfNeeded();
   }
 
   /// Median of the last [_smoothingWindow] readings. Chosen over a mean

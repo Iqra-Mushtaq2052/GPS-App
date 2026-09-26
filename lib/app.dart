@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5,8 +7,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_scope.dart';
 import 'core/native/native_proximity_bridge.dart';
 import 'features/home/home_page.dart';
+import 'features/mosque/discover_mosques_page.dart';
+import 'features/mosque/my_masajid_page.dart';
 import 'features/onboarding/permission_onboarding_page.dart';
 import 'features/role/role_selection_page.dart';
+import 'features/settings/settings_page.dart';
 
 /// ─── Theme Notifier ───────────────────────────────────────────────
 /// Manages Light / Dark / System theme mode, persisted in SharedPreferences.
@@ -178,6 +183,75 @@ final ThemeData lightTheme = ThemeData(
   useMaterial3: true,
 );
 
+/// ─── Main Shell ───────────────────────────────────────────────────
+class MainShell extends StatefulWidget {
+  const MainShell({super.key});
+
+  static void jumpTo(BuildContext context, int index) {
+    final state = context.findAncestorStateOfType<_MainShellState>();
+    if (state != null) {
+      state.setIndex(index);
+    }
+  }
+
+  @override
+  State<MainShell> createState() => _MainShellState();
+}
+
+class _MainShellState extends State<MainShell> {
+  int _currentIndex = 0;
+
+  void setIndex(int index) {
+    if (mounted) {
+      setState(() {
+        _currentIndex = index;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: const [
+          HomePage(),
+          DiscoverMosquesPage(),
+          MyMasajidPage(),
+          SettingsPage(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: setIndex,
+        selectedItemColor: theme.colorScheme.primary, // emerald green
+        unselectedItemColor: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+        showUnselectedLabels: true,
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.explore),
+            label: 'Discover',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.mosque), // or bookmark
+            label: 'My Masajid',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.settings),
+            label: 'Settings',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// ─── App Widget ───────────────────────────────────────────────────
 class GpsApp extends StatelessWidget {
   const GpsApp({super.key});
@@ -188,7 +262,7 @@ class GpsApp extends StatelessWidget {
       listenable: themeNotifier,
       builder: (context, _) {
         return MaterialApp(
-          title: 'GPS App',
+          title: 'Masjid GPS',
           debugShowCheckedModeBanner: false,
           theme: lightTheme,
           darkTheme: darkTheme,
@@ -211,7 +285,7 @@ class _StartupGate extends StatefulWidget {
 }
 
 class _StartupGateState extends State<_StartupGate> {
-  Future<_StartupResult>? _readyFuture;
+  Future<({bool hasPermissions, bool hasRole})>? _readyFuture;
 
   @override
   void didChangeDependencies() {
@@ -219,23 +293,44 @@ class _StartupGateState extends State<_StartupGate> {
     _readyFuture ??= _prepare();
   }
 
-  Future<_StartupResult> _prepare() async {
+  Future<({bool hasPermissions, bool hasRole})> _prepare() async {
     // Load persisted theme preference.
     await themeNotifier.load();
 
-    // Check if role has been selected
-    if (!mounted) return _StartupResult.ready;
+    if (!mounted) return (hasPermissions: false, hasRole: false);
     final scope = AppScope.of(context);
-    final hasRole = await scope.roleService.hasRole();
-    if (!hasRole) return _StartupResult.needsRole;
 
-    if (kIsWeb) return _StartupResult.ready;
+    // Offline cache + realtime connection for downloaded mosques.
+    try {
+      await scope.sync.start();
+    } catch (e) {
+      debugPrint('sync start failed: $e');
+    }
+
+    if (kIsWeb) {
+      final hasRole = await scope.roleService.hasRole();
+      return (hasPermissions: true, hasRole: hasRole);
+    }
+
     try {
       await scope.notifications.init();
       final foreground = await scope.permissions.hasForegroundLocation();
       final background = await scope.permissions.hasBackgroundLocation();
+      final hasPermissions = foreground && background;
 
-      if (foreground && background) {
+      final hasRole = await scope.roleService.hasRole();
+
+      // Imam / committee UI requires a signed-in account.
+      if (hasRole && await scope.roleService.isImam()) {
+        if (!scope.auth.isSignedIn) {
+          await scope.roleService.logout();
+          return (hasPermissions: hasPermissions, hasRole: false);
+        }
+        unawaited(scope.auth.refreshStatus(createIfMissing: true));
+        unawaited(scope.sync.refreshManaged().then((_) {}, onError: (_) {}));
+      }
+
+      if (hasPermissions) {
         final prefs = await SharedPreferences.getInstance();
         final enabled = prefs.getBool('monitoring_enabled') ?? false;
         final serviceOn = await scope.location.isLocationServiceEnabled();
@@ -246,18 +341,18 @@ class _StartupGateState extends State<_StartupGate> {
           final mosques = await scope.mosqueRepository.watchAll().first;
           await NativeProximityBridge.startNativeService(mosques);
         }
-        return _StartupResult.ready;
       }
-      return _StartupResult.needsPermissions;
+
+      return (hasPermissions: hasPermissions, hasRole: hasRole);
     } catch (_) {
-      return _StartupResult.ready;
+      return (hasPermissions: false, hasRole: false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<_StartupResult>(
-      future: _readyFuture!,
+    return FutureBuilder<({bool hasPermissions, bool hasRole})>(
+      future: _readyFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
           return const Scaffold(
@@ -266,14 +361,15 @@ class _StartupGateState extends State<_StartupGate> {
             ),
           );
         }
-        return switch (snapshot.data!) {
-          _StartupResult.needsRole => const RoleSelectionPage(),
-          _StartupResult.needsPermissions => const PermissionOnboardingPage(),
-          _StartupResult.ready => const HomePage(),
-        };
+        final data = snapshot.data!;
+        if (!data.hasPermissions) {
+          return const PermissionOnboardingPage();
+        } else if (!data.hasRole) {
+          return const RoleSelectionPage();
+        } else {
+          return const MainShell();
+        }
       },
     );
   }
 }
-
-enum _StartupResult { needsRole, needsPermissions, ready }

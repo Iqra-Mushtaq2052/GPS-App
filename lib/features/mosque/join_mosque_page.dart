@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../app_scope.dart';
+import '../../core/security/security_service.dart';
 import '../../core/supabase/supabase_service.dart';
 
 class JoinMosquePage extends StatefulWidget {
@@ -23,8 +24,8 @@ class _JoinMosquePageState extends State<JoinMosquePage> {
 
   Future<void> _searchMosque() async {
     final code = _codeController.text.trim().toUpperCase();
-    if (code.length != 6) {
-      setState(() => _errorMessage = 'Code must be 6 characters');
+    if (!SecurityService.isValidShareCode(code)) {
+      setState(() => _errorMessage = 'Code 6 characters (A-Z, 0-9) ka hota hai');
       return;
     }
 
@@ -34,52 +35,40 @@ class _JoinMosquePageState extends State<JoinMosquePage> {
       _found = null;
     });
 
+    final scope = AppScope.of(context);
     try {
-      final mosque = await AppScope.of(context).supabaseService.fetchMosqueByCode(code);
+      final mosque = await scope.supabaseService.fetchMosqueByCode(code);
+      if (!mounted) return;
       setState(() {
         if (mosque != null) {
           _found = mosque;
         } else {
-          _errorMessage = 'Mosque not found';
+          _errorMessage = 'Is code ki koi masjid nahi mili';
         }
       });
     } catch (e) {
-      setState(() {
-        _errorMessage = 'Error searching mosque. Please try again.';
-      });
+      if (mounted) setState(() => _errorMessage = friendlyCloudError(e));
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _joinMosque() async {
-    if (_found == null) return;
+    final found = _found;
+    if (found == null) return;
     final scope = AppScope.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    
+    final navigator = Navigator.of(context);
+
     setState(() => _isLoading = true);
     try {
-      await scope.mosqueRepository.add(
-        name: _found!.name,
-        latitude: _found!.latitude,
-        longitude: _found!.longitude,
-        radiusMeters: _found!.radiusMeters,
-        supabaseId: _found!.id,
-        shareCode: _found!.shareCode,
+      await scope.sync.downloadMosque(found);
+      navigator.pop();
+      messenger.showSnackBar(
+        SnackBar(content: Text('✅ "${found.name}" connected — live times aur announcements shuru.')),
       );
-
-      await scope.proximity.refreshMosques();
-
-      if (mounted) {
-        Navigator.of(context).pop();
-        messenger.showSnackBar(
-          const SnackBar(content: Text('Successfully joined mosque!')),
-        );
-      }
     } catch (e) {
-      setState(() => _errorMessage = 'Failed to join mosque: $e');
+      if (mounted) setState(() => _errorMessage = 'Join nahi hua: ${friendlyCloudError(e)}');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -103,7 +92,7 @@ class _JoinMosquePageState extends State<JoinMosquePage> {
             ),
           ),
         ),
-        title: const Text('Join Mosque'),
+        title: const Text('Share Code se Join'),
       ),
       body: Container(
         decoration: isDark ? const BoxDecoration(
@@ -127,7 +116,7 @@ class _JoinMosquePageState extends State<JoinMosquePage> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Ask your Imam for the 6-character code to join your mosque.',
+                'Imam se 6 characters ka share code lein aur yahan likhein.',
                 style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
               ),
               const SizedBox(height: 24),
@@ -226,7 +215,7 @@ class _JoinMosquePageState extends State<JoinMosquePage> {
                               backgroundColor: theme.colorScheme.primary,
                               foregroundColor: Colors.white,
                             ),
-                            child: const Text('Confirm & Join', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            child: Text(AppScope.of(context).sync.isDownloaded(_found!.id) ? 'Pehle se downloaded — dobara sync karein' : 'Download & Connect', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                           ),
                         ),
                       ],

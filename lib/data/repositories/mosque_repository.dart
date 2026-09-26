@@ -16,6 +16,8 @@ class MosqueRepository {
 
   Future<Mosque?> getById(int id) => _dao.getById(id);
 
+  Future<Mosque?> getBySupabaseId(String supabaseId) => _dao.getBySupabaseId(supabaseId);
+
   Future<int> add({
     required String name,
     required double latitude,
@@ -34,6 +36,45 @@ class MosqueRepository {
         shareCode: Value(shareCode),
       ),
     );
+  }
+
+  /// Inserts a cloud mosque locally, or refreshes the existing copy
+  /// (name / location / radius) while keeping the user's on/off switch.
+  /// Returns the local id.
+  Future<int> upsertCloud({
+    required String supabaseId,
+    required String name,
+    required double latitude,
+    required double longitude,
+    required int radiusMeters,
+    String? shareCode,
+  }) async {
+    final existing = await _dao.getBySupabaseId(supabaseId);
+    if (existing == null) {
+      return add(
+        name: name,
+        latitude: latitude,
+        longitude: longitude,
+        radiusMeters: radiusMeters,
+        supabaseId: supabaseId,
+        shareCode: shareCode,
+      );
+    }
+    final changed = existing.name != name ||
+        existing.latitude != latitude ||
+        existing.longitude != longitude ||
+        existing.radiusMeters != radiusMeters ||
+        (shareCode != null && existing.shareCode != shareCode);
+    if (changed) {
+      await update(existing.copyWith(
+        name: name,
+        latitude: latitude,
+        longitude: longitude,
+        radiusMeters: radiusMeters,
+        shareCode: Value(shareCode ?? existing.shareCode),
+      ));
+    }
+    return existing.id;
   }
 
   Future<void> update(Mosque mosque) => _dao.updateMosque(mosque.toCompanion(true));

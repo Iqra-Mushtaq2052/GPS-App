@@ -12,4 +12,9 @@ class SupabaseConfig {
   // Table names
   static const String mosquesTable = 'mosques';
   static const String prayerTimesTable = 'prayer_times';
+  static const String announcementsTable = 'announcements';
+  static const String imamProfilesTable = 'imam_profiles';
+
+  /// Masjid Store search radius options (km). Default is the first one.
+  static const List<double> storeRadiiKm = [5, 10];
 }

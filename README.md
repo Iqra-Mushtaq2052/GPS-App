@@ -32,9 +32,22 @@ An intelligent, offline-first Flutter & Native Android application designed to *
 - **Sunnah Fasting Badges**: Highlights Ayyam al-Beed (13th, 14th, 15th) and Monday/Thursday Sunnah fasts.
 - **Sacred Months & Islamic Events**: Master directory of annual historical events (Ramadan, Eidain, Ashura, Mawlid, Laylatul Qadr, Day of Arafah, etc.).
 
-### 👥 4. Role-Based Cloud Sync (Imam vs Namazi)
-- **Imam Mode**: Create & manage mosques, customize geofence radii on OpenStreetMap, update Jamaat prayer timings, post mosque announcements, and generate 6-character Share Codes.
-- **Namazi (User) Mode**: Join mosques via Share Code or discover nearby registered masajid without edit permissions. Real-time announcement feeds and live Jamaat schedules.
+### 👥 4. Masjid Store + Live Sync (Imam vs Namazi)
+- **Imam / Committee accounts** (Supabase Auth, email + password). A new imam is `pending` until the admin approves them. Only an **approved imam** can register a mosque; the server rejects a second mosque within **50 m** of an existing one.
+- **One imam per mosque** + **committee members** (added by the imam by email). Committee can update jamaat times (incl. Jumuah) and post announcements; only the imam can edit/delete the mosque or manage the committee.
+- **Namazi (no login)** cannot add locations. They open the **Masjid Store**, see registered mosques within **5 km / 10 km**, and tap **Download** — the mosque is saved on the phone (auto-vibrate geofence) and connected.
+- **Live**: while the app is open, Supabase Realtime pushes jamaat-time changes, new announcements and imam edits instantly (with a local notification). Everything is cached for offline use. Share-code join still works.
+- Push notifications while the app is closed (FCM) are planned for a later phase.
+
+#### Backend setup (one time)
+1. Supabase Dashboard → **SQL Editor** → run `supabase/migrations/20260926000000_masjid_store.sql` (safe to re-run).
+2. Approve an imam:
+   ```sql
+   update public.imam_profiles set status = 'approved', reviewed_at = now()
+   where user_id = (select id from auth.users where email = 'imam@example.com');
+   ```
+   Pending requests: `select * from public.admin_imam_requests;`
+3. (Optional) Authentication → Providers → Email: turn off "Confirm email" if imams should log in right after sign-up.
 
 ### 🗺️ 5. Interactive Map & Geofencing Picker
 - **OpenStreetMap Integration (`flutter_map`)**: Visual radius picker displaying live GPS user position, draggable pinpointing, and translucent geofence circles.

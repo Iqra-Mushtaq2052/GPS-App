@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../../app_scope.dart';
-import '../../core/discovery/mosque_discovery_service.dart';
+import '../../core/supabase/supabase_service.dart';
 import 'join_mosque_page.dart';
+import 'mosque_detail_page.dart';
 
 class DiscoverMosquesPage extends StatefulWidget {
   const DiscoverMosquesPage({super.key});
@@ -15,18 +16,17 @@ class DiscoverMosquesPage extends StatefulWidget {
 class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
   bool _isLoading = true;
   String? _errorMessage;
-  Position? _currentPos;
-  List<DiscoveredMosque> _mosques = [];
-  double _searchRadiusMeters = 1000; // Default 1 km
-  bool _isAddingAll = false;
+  List<StoreMosque> _mosques = [];
+  double _radiusKm = 5.0; // Default to 5 km
+  final Set<String> _downloading = {};
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _discoverMosques());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
-  Future<void> _discoverMosques() async {
+  Future<void> _load() async {
     if (!mounted) return;
     setState(() {
       _isLoading = true;
@@ -36,608 +36,515 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
     final scope = AppScope.of(context);
     try {
       if (!await scope.location.isLocationServiceEnabled()) {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'GPS / Location is turned off. Please turn on Location first.';
-          });
-        }
+        _fail('GPS / Location band hai. Pehle Location on karein.');
         return;
       }
-
       var permission = await scope.location.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await scope.location.requestPermission();
       }
-
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Location permission is required to detect nearby mosques.';
-          });
-        }
+        _fail('Qareeb ki masjidein dhoondne ke liye Location permission chahiye.');
         return;
       }
 
-      // Fresh live position fetch
       Position? pos;
       try {
         pos = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.medium,
-            timeLimit: Duration(seconds: 5),
+            timeLimit: Duration(seconds: 8),
           ),
         );
       } catch (_) {
         pos = await scope.location.getQuickPosition();
       }
-
       if (pos == null) {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Could not get GPS position. Make sure GPS is enabled.';
-          });
-        }
+        _fail('GPS position nahi mili. GPS on karke dobara koshish karein.');
         return;
       }
 
-      final saved = await scope.mosqueRepository.getAll();
-
-      final discovered = await scope.discovery.fetchNearbyMosques(
+      final list = await scope.supabaseService.nearbyMosques(
         latitude: pos.latitude,
         longitude: pos.longitude,
-        radiusMeters: _searchRadiusMeters,
-        savedMosques: saved,
+        radiusKm: _radiusKm,
       );
 
       if (mounted) {
         setState(() {
-          _currentPos = pos;
-          _mosques = discovered;
+          _mosques = list;
           _isLoading = false;
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _errorMessage = 'Could not fetch nearby mosques: $e';
-        });
-      }
+      _fail(friendlyCloudError(e));
     }
   }
 
-  Future<void> _saveMosque(DiscoveredMosque mosque) async {
+  void _fail(String message) {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = false;
+      _errorMessage = message;
+    });
+  }
+
+  Future<void> _download(StoreMosque m) async {
+    if (_downloading.contains(m.id)) return;
     final scope = AppScope.of(context);
-    final isImam = await scope.roleService.isImam();
-
-    if (!isImam) {
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.lock_outline, color: Color(0xFFF59E0B)),
-              SizedBox(width: 8),
-              Text('Imam Code Required'),
-            ],
-          ),
-          content: Text(
-            'Only Imams can register new mosques.\n\nTo add "${mosque.name}" to your auto-silent list, please enter the 6-character Share Code provided by the Imam of this mosque.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981)),
-              icon: const Icon(Icons.pin_outlined, size: 18),
-              label: const Text('Enter Share Code'),
-              onPressed: () {
-                Navigator.pop(ctx);
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const JoinMosquePage()),
-                );
-              },
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _downloading.add(m.id));
     try {
-      // Imam claims & registers mosque with share code via uploadMosque
-      String? cloudId;
-      String? shareCode;
-      try {
-        final uploaded = await scope.supabaseService.uploadMosque(
-          name: mosque.name,
-          latitude: mosque.latitude,
-          longitude: mosque.longitude,
-          radiusMeters: 40,
-        );
-        cloudId = uploaded.id;
-        shareCode = uploaded.shareCode;
-      } catch (_) {
-        // Offline fallback
-      }
-
-      await scope.mosqueRepository.add(
-        name: mosque.name,
-        latitude: mosque.latitude,
-        longitude: mosque.longitude,
-        radiusMeters: 40,
-        supabaseId: cloudId,
-        shareCode: shareCode,
-      );
-
-      await scope.proximity.refreshMosques();
-
-      if (mounted) {
-        setState(() {
-          mosque.isSaved = true;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              shareCode != null
-                  ? '✅ "${mosque.name}" registered! Share Code: $shareCode'
-                  : '✅ "${mosque.name}" registered locally!',
-            ),
-            backgroundColor: const Color(0xFF10B981),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _saveAllUnsaved() async {
-    final scope = AppScope.of(context);
-    final isImam = await scope.roleService.isImam();
-
-    if (!isImam) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Only Imams can register mosques. Users join via Share Code.'),
-          backgroundColor: Colors.orangeAccent,
-        ),
-      );
-      return;
-    }
-
-    final unsaved = _mosques.where((m) => !m.isSaved).toList();
-    if (unsaved.isEmpty) return;
-
-    setState(() => _isAddingAll = true);
-
-    int addedCount = 0;
-    for (final m in unsaved) {
-      try {
-        String? cloudId;
-        String? shareCode;
-        try {
-          final uploaded = await scope.supabaseService.uploadMosque(
-            name: m.name,
-            latitude: m.latitude,
-            longitude: m.longitude,
-            radiusMeters: 40,
-          );
-          cloudId = uploaded.id;
-          shareCode = uploaded.shareCode;
-        } catch (_) {}
-
-        await scope.mosqueRepository.add(
-          name: m.name,
-          latitude: m.latitude,
-          longitude: m.longitude,
-          radiusMeters: 40,
-          supabaseId: cloudId,
-          shareCode: shareCode,
-        );
-        m.isSaved = true;
-        addedCount++;
-      } catch (_) {}
-    }
-
-    await scope.proximity.refreshMosques();
-
-    if (mounted) {
-      setState(() => _isAddingAll = false);
-      ScaffoldMessenger.of(context).showSnackBar(
+      await scope.sync.downloadMosque(m);
+      messenger.showSnackBar(
         SnackBar(
-          content: Text('🎉 Registered $addedCount mosques with Share Codes!'),
+          content: Text('Downloaded! Mosque added to My Masajid.'),
           backgroundColor: const Color(0xFF10B981),
           behavior: SnackBarBehavior.floating,
         ),
       );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Download failed: ${friendlyCloudError(e)}')));
+    } finally {
+      if (mounted) setState(() => _downloading.remove(m.id));
     }
   }
 
-  String _formatDistance(double meters) {
-    if (meters < 1000) {
-      return '${meters.round()}m away';
+  void _openDetail(StoreMosque m, bool isDownloaded) {
+    if (isDownloaded) {
+      final local = AppScope.of(context).sync.localFor(m.id);
+      if (local != null) {
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => MosqueDetailPage(mosque: local)),
+        );
+      }
     } else {
-      return '${(meters / 1000).toStringAsFixed(1)} km away';
+      _showPreviewSheet(m);
     }
   }
+
+  void _showPreviewSheet(StoreMosque m) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                m.name,
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              if (m.address != null && m.address!.isNotEmpty)
+                Text(
+                  m.address!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.grey),
+                ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.people, color: Colors.grey, size: 20),
+                  const SizedBox(width: 8),
+                  Text('${m.followerCount} followers'),
+                  const SizedBox(width: 16),
+                  const Icon(Icons.map, color: Colors.grey, size: 20),
+                  const SizedBox(width: 8),
+                  Text(_formatDistance(m.distanceMeters)),
+                ],
+              ),
+              const SizedBox(height: 24),
+              StatefulBuilder(
+                builder: (BuildContext context, StateSetter setStateSheet) {
+                  final bool busy = _downloading.contains(m.id);
+                  return FilledButton(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            Navigator.pop(context);
+                            await _download(m);
+                          },
+                    style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      backgroundColor: const Color(0xFF10B981),
+                    ),
+                    child: busy
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text(
+                            'Download',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                  );
+                }
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => MosqueDetailPage(cloudMosque: m),
+                    ),
+                  );
+                },
+                child: const Text('View Full Details'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatDistance(double meters) =>
+      meters < 1000 ? '${meters.round()} m' : '${(meters / 1000).toStringAsFixed(1)} km';
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final unsavedCount = _mosques.where((m) => !m.isSaved).length;
 
     return Scaffold(
+      backgroundColor: isDark ? const Color(0xFF0D1117) : theme.scaffoldBackgroundColor,
       appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: isDark
-                  ? [const Color(0xFF059669), Colors.transparent]
-                  : [const Color(0xFF059669).withValues(alpha: 0.2), Colors.transparent],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
-          ),
-        ),
-        title: const Text('Discover Nearby Mosques'),
+        title: const Text('Nearby Mosques'),
+        centerTitle: true,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Nearby',
-            onPressed: _discoverMosques,
+            tooltip: 'Refresh',
+            onPressed: _isLoading ? null : _load,
           ),
         ],
-      ),
-      body: Container(
-        decoration: isDark
-            ? const BoxDecoration(
-                gradient: RadialGradient(
-                  center: Alignment.topCenter,
-                  radius: 1.5,
-                  colors: [Color(0xFF161B22), Color(0xFF0D1117)],
-                ),
-              )
-            : null,
-        child: Column(
-          children: [
-            // ── GPS Position Banner ──
-            if (_currentPos != null)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.location_on, size: 16, color: theme.colorScheme.primary),
-                    const SizedBox(width: 6),
-                    Text(
-                      'GPS Position: ${_currentPos!.latitude.toStringAsFixed(4)}°, ${_currentPos!.longitude.toStringAsFixed(4)}°',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.primary,
-                      ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(50),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextButton.icon(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const JoinMosquePage()),
                     ),
-                  ],
+                    icon: const Icon(Icons.pin_outlined),
+                    label: const Text('Join by Code'),
+                    style: TextButton.styleFrom(
+                      alignment: Alignment.centerLeft,
+                      backgroundColor: isDark ? const Color(0xFF161B22) : Colors.grey[200],
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 12),
+                _RadiusChip(
+                  label: '5 km',
+                  selected: _radiusKm == 5.0,
+                  onTap: () {
+                    if (_radiusKm != 5.0 && !_isLoading) {
+                      setState(() => _radiusKm = 5.0);
+                      _load();
+                    }
+                  },
+                ),
+                const SizedBox(width: 8),
+                _RadiusChip(
+                  label: '10 km',
+                  selected: _radiusKm == 10.0,
+                  onTap: () {
+                    if (_radiusKm != 10.0 && !_isLoading) {
+                      setState(() => _radiusKm = 10.0);
+                      _load();
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      body: _buildBody(theme),
+    );
+  }
 
-            // ── Search Radius Options Bar ──
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF161B22) : theme.colorScheme.surface,
-                border: Border(bottom: BorderSide(color: theme.dividerColor)),
-              ),
-              child: Row(
+  Widget _buildBody(ThemeData theme) {
+    if (_isLoading) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Color(0xFF10B981)),
+            const SizedBox(height: 16),
+            Text('Searching within ${_radiusKm.round()} km...'),
+          ],
+        ),
+      );
+    }
+
+    if (_errorMessage != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Card(
+            color: Colors.redAccent.withValues(alpha: 0.1),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.5)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.radar, size: 20, color: Color(0xFF10B981)),
-                  const SizedBox(width: 8),
-                  const Text('Search Radius:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  const SizedBox(width: 12),
-                  Row(
-                    children: [1000.0, 3000.0].map((rad) {
-                      final label = rad >= 1000 ? '${(rad / 1000).round()} km' : '${rad.round()}m';
-                      final isSelected = _searchRadiusMeters == rad;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(label),
-                          selected: isSelected,
-                          selectedColor: theme.colorScheme.primary.withValues(alpha: 0.2),
-                          labelStyle: TextStyle(
-                            color: isSelected ? theme.colorScheme.primary : theme.colorScheme.onSurface,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                            fontSize: 13,
-                          ),
-                          onSelected: (val) {
-                            if (val) {
-                              setState(() => _searchRadiusMeters = rad);
-                              _discoverMosques();
-                            }
-                          },
-                        ),
-                      );
-                    }).toList(),
+                  const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+                  const SizedBox(height: 16),
+                  Text(
+                    _errorMessage!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.redAccent),
+                  ),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: _load,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry'),
+                    style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
                   ),
                 ],
               ),
             ),
+          ),
+        ),
+      );
+    }
 
-            // ── Main Content Body ──
-            Expanded(
-              child: _isLoading
-                  ? Center(
-                      child: Column(
+    if (_mosques.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.search_off, size: 64, color: Colors.grey),
+              const SizedBox(height: 16),
+              Text(
+                'No mosques found within ${_radiusKm.round()} km.\nTry expanding to 10 km.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.grey, fontSize: 16),
+              ),
+              if (_radiusKm < 10.0) ...[
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: () {
+                    setState(() => _radiusKm = 10.0);
+                    _load();
+                  },
+                  icon: const Icon(Icons.radar),
+                  label: const Text('Expand to 10 km'),
+                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
+    final sync = AppScope.of(context).sync;
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: const Color(0xFF10B981),
+      child: ListenableBuilder(
+        listenable: sync,
+        builder: (context, _) => ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: _mosques.length,
+          itemBuilder: (context, index) {
+            final m = _mosques[index];
+            final downloaded = sync.isDownloaded(m.id);
+            final busy = _downloading.contains(m.id);
+            return _MosqueCard(
+              mosque: m,
+              distance: _formatDistance(m.distanceMeters),
+              downloaded: downloaded,
+              busy: busy,
+              onDownload: () => _download(m),
+              onTap: () => _openDetail(m, downloaded),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _RadiusChip extends StatelessWidget {
+  const _RadiusChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ActionChip(
+      label: Text(label),
+      onPressed: onTap,
+      backgroundColor: selected ? const Color(0xFF10B981) : Colors.transparent,
+      labelStyle: TextStyle(
+        color: selected ? Colors.white : Theme.of(context).colorScheme.onSurface,
+        fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+      ),
+      side: BorderSide(
+        color: selected ? const Color(0xFF10B981) : Colors.grey,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    );
+  }
+}
+
+class _MosqueCard extends StatelessWidget {
+  const _MosqueCard({
+    required this.mosque,
+    required this.distance,
+    required this.downloaded,
+    required this.busy,
+    required this.onDownload,
+    required this.onTap,
+  });
+
+  final StoreMosque mosque;
+  final String distance;
+  final bool downloaded;
+  final bool busy;
+  final VoidCallback onDownload;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: downloaded ? const Color(0xFF10B981).withValues(alpha: 0.5) : (isDark ? const Color(0xFF30363D) : theme.dividerColor),
+        ),
+      ),
+      color: isDark ? const Color(0xFF161B22) : theme.cardColor,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          mosque.name,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Icon(Icons.location_on, size: 14, color: Colors.grey),
+                            const SizedBox(width: 4),
+                            Text(distance, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                            const SizedBox(width: 12),
+                            const Icon(Icons.people, size: 14, color: Colors.grey),
+                            const SizedBox(width: 4),
+                            Text('${mosque.followerCount}', style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right, color: Colors.grey),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  if (mosque.hasTimes) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF10B981).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          CircularProgressIndicator(color: theme.colorScheme.primary),
-                          const SizedBox(height: 16),
+                          Icon(Icons.schedule, size: 12, color: Color(0xFF10B981)),
+                          SizedBox(width: 4),
                           Text(
-                            'Scanning nearby mosques within ${_searchRadiusMeters >= 1000 ? "${(_searchRadiusMeters / 1000).round()} km" : "${_searchRadiusMeters.round()}m"}...',
-                            style: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.7)),
+                            'Prayer Times Set',
+                            style: TextStyle(fontSize: 12, color: Color(0xFF10B981), fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
+                    ),
+                    const Spacer(),
+                  ],
+                  if (!mosque.hasTimes) const Spacer(),
+                  if (downloaded)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Text('Downloaded', style: TextStyle(color: Colors.grey, fontSize: 12)),
                     )
-                  : _errorMessage != null
-                      ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(24),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.cloud_off, size: 56, color: Colors.orangeAccent),
-                                const SizedBox(height: 16),
-                                Text(
-                                  _errorMessage!,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.7)),
-                                ),
-                                const SizedBox(height: 16),
-                                FilledButton.icon(
-                                  onPressed: _discoverMosques,
-                                  icon: const Icon(Icons.refresh),
-                                  label: const Text('Try Again'),
-                                ),
-                              ],
-                            ),
-                          ),
-                        )
-                      : _mosques.isEmpty
-                          ? Center(
-                              child: Padding(
-                                padding: const EdgeInsets.all(24),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.location_searching, size: 56, color: Colors.grey),
-                                    const SizedBox(height: 16),
-                                    Text(
-                                      'No registered mosques found in this ${_searchRadiusMeters >= 1000 ? "${(_searchRadiusMeters / 1000).round()} km" : "${_searchRadiusMeters.round()}m"} circle.',
-                                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                                      textAlign: TextAlign.center,
-                                    ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      'Try searching within 3 km.',
-                                      style: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.6), height: 1.4),
-                                      textAlign: TextAlign.center,
-                                    ),
-                                    const SizedBox(height: 20),
-                                    FilledButton.icon(
-                                      onPressed: () {
-                                        setState(() => _searchRadiusMeters = 3000);
-                                        _discoverMosques();
-                                      },
-                                      icon: const Icon(Icons.zoom_out_map, size: 18),
-                                      label: const Text('Search 3 km Radius'),
-                                    ),
-                                  ],
-                                ),
-                              ),
+                  else
+                    FilledButton(
+                      onPressed: busy ? null : onDownload,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF10B981),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                      ),
+                      child: busy
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                             )
-                          : RefreshIndicator(
-                              onRefresh: _discoverMosques,
-                              child: ListView.builder(
-                                padding: const EdgeInsets.all(16),
-                                itemCount: _mosques.length,
-                                itemBuilder: (context, index) {
-                                  final m = _mosques[index];
-
-                                  return Container(
-                                    margin: const EdgeInsets.only(bottom: 12),
-                                    decoration: BoxDecoration(
-                                      color: isDark ? const Color(0xFF161B22) : theme.colorScheme.surface,
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                        color: m.isSaved
-                                            ? const Color(0xFF10B981).withValues(alpha: 0.6)
-                                            : theme.dividerColor,
-                                        width: m.isSaved ? 1.5 : 1,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.05),
-                                          blurRadius: 6,
-                                          offset: const Offset(0, 2),
-                                        ),
-                                      ],
-                                    ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(14),
-                                      child: Row(
-                                        crossAxisAlignment: CrossAxisAlignment.center,
-                                        children: [
-                                          // Mosque Circle Avatar Icon
-                                          Container(
-                                            padding: const EdgeInsets.all(10),
-                                            decoration: BoxDecoration(
-                                              color: m.isSaved
-                                                  ? const Color(0xFF10B981).withValues(alpha: 0.15)
-                                                  : theme.colorScheme.secondary.withValues(alpha: 0.15),
-                                              shape: BoxShape.circle,
-                                            ),
-                                            child: Icon(
-                                              Icons.mosque,
-                                              color: m.isSaved
-                                                  ? const Color(0xFF10B981)
-                                                  : theme.colorScheme.secondary,
-                                              size: 24,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-
-                                          // Mosque Name, Distance & Address (Fully Constrained via Expanded)
-                                          Expanded(
-                                            child: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                Text(
-                                                  m.name,
-                                                  style: const TextStyle(
-                                                    fontSize: 16,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                ),
-                                                const SizedBox(height: 3),
-                                                Row(
-                                                  children: [
-                                                    Icon(
-                                                      Icons.near_me,
-                                                      size: 13,
-                                                      color: theme.colorScheme.primary,
-                                                    ),
-                                                    const SizedBox(width: 4),
-                                                    Text(
-                                                      _formatDistance(m.distanceMeters),
-                                                      style: TextStyle(
-                                                        fontSize: 13,
-                                                        color: theme.colorScheme.primary,
-                                                        fontWeight: FontWeight.w600,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                                if (m.address != null) ...[
-                                                  const SizedBox(height: 2),
-                                                  Text(
-                                                    m.address!,
-                                                    style: TextStyle(
-                                                      fontSize: 12,
-                                                      color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-                                                    ),
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
-                                                ],
-                                              ],
-                                            ),
-                                          ),
-                                          const SizedBox(width: 10),
-
-                                          // Action Button (Saved Badge or + Auto-Silent)
-                                          m.isSaved
-                                              ? Container(
-                                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                                  decoration: BoxDecoration(
-                                                    color: const Color(0xFF10B981).withValues(alpha: 0.15),
-                                                    borderRadius: BorderRadius.circular(20),
-                                                    border: Border.all(color: const Color(0xFF10B981)),
-                                                  ),
-                                                  child: const Row(
-                                                    mainAxisSize: MainAxisSize.min,
-                                                    children: [
-                                                      Icon(Icons.check, size: 14, color: Color(0xFF10B981)),
-                                                      SizedBox(width: 4),
-                                                      Text(
-                                                        'Saved',
-                                                        style: TextStyle(
-                                                          color: Color(0xFF10B981),
-                                                          fontSize: 12,
-                                                          fontWeight: FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                )
-                                              : FilledButton(
-                                                  onPressed: () => _saveMosque(m),
-                                                  style: FilledButton.styleFrom(
-                                                    backgroundColor: theme.colorScheme.primary,
-                                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                                    shape: RoundedRectangleBorder(
-                                                      borderRadius: BorderRadius.circular(12),
-                                                    ),
-                                                  ),
-                                                  child: const Row(
-                                                    mainAxisSize: MainAxisSize.min,
-                                                    children: [
-                                                      Icon(Icons.add, size: 15),
-                                                      SizedBox(width: 3),
-                                                      Text('Auto-Silent', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                                                    ],
-                                                  ),
-                                                ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-            ),
-
-            // ── Add All Footer Button ──
-            if (!_isLoading && _mosques.isNotEmpty && unsavedCount > 0)
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF161B22) : theme.colorScheme.surface,
-                  border: Border(top: BorderSide(color: theme.dividerColor)),
-                ),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: _isAddingAll ? null : _saveAllUnsaved,
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      backgroundColor: theme.colorScheme.primary,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          : const Text('Download', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                     ),
-                    icon: _isAddingAll
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                          )
-                        : const Icon(Icons.playlist_add_check),
-                    label: Text(
-                      _isAddingAll ? 'Saving All...' : 'Add All $unsavedCount Nearby Mosques',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
-                  ),
-                ),
+                ],
               ),
-          ],
+            ],
+          ),
         ),
       ),
     );
