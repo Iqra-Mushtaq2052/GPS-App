@@ -3,16 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app_scope.dart';
+import '../../app.dart';
 import '../../background/proximity_engine.dart';
 import '../../core/native/native_proximity_bridge.dart';
 import '../../core/prayer/hijri_service.dart';
 import '../../core/prayer/prayer_tracker_service.dart';
 import '../../data/db/app_database.dart';
 import '../calendar/islamic_calendar_sheet.dart';
-import '../diagnostics/diagnostics_page.dart';
-import '../mosque/discover_mosques_page.dart';
+import '../mosque/add_mosque_page.dart';
 import '../qibla/qibla_compass_page.dart';
-import '../settings/settings_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -192,9 +191,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 IconButton(
                   icon: Icon(Icons.settings, color: theme.colorScheme.onSurface),
-                  onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const SettingsPage()),
-                  ),
+                  onPressed: () => MainShell.jumpTo(context, 3),
                 ),
               ],
             ),
@@ -504,7 +501,51 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 16),
 
-            // ── Quick Actions Row ──
+            // ── Role-aware CTA Banner ──
+            StreamBuilder<List<Mosque>>(
+              stream: scope.mosqueRepository.watchAll(),
+              builder: (context, snapshot) {
+                final mosqueCount = snapshot.data?.length ?? 0;
+
+                // IMAM: show register mosque CTA if no managed mosque yet
+                if (_isImam) {
+                  return ListenableBuilder(
+                    listenable: scope.sync,
+                    builder: (context, _) {
+                      final managed = scope.sync.managedMosques;
+                      if (managed.isNotEmpty) return const SizedBox.shrink();
+                      return _HeroCTA(
+                        icon: Icons.add_location_alt,
+                        color: const Color(0xFFF59E0B),
+                        title: 'Register Your Mosque',
+                        subtitle: 'You haven\'t registered a mosque yet. Set up your mosque profile, prayer times, and share code.',
+                        buttonLabel: 'Register Mosque Now',
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const AddMosquePage()),
+                        ),
+                      );
+                    },
+                  );
+                }
+
+                // NAMAZI: show discover CTA when no mosques downloaded
+                if (mosqueCount == 0) {
+                  return _HeroCTA(
+                    icon: Icons.travel_explore,
+                    color: const Color(0xFF10B981),
+                    title: 'Find Nearby Mosques',
+                    subtitle: 'Search mosques near you, download them, and your phone will auto-silence when you arrive.',
+                    buttonLabel: 'Open Masjid Store',
+                    onTap: () => MainShell.jumpTo(context, 1),
+                  );
+                }
+
+                return const SizedBox.shrink();
+              },
+            ),
+            const SizedBox(height: 16),
+
+            // ── Quick Actions ──
             const Text(
               'Quick Actions',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
@@ -518,20 +559,39 @@ class _HomePageState extends State<HomePage> {
               crossAxisSpacing: 12,
               childAspectRatio: 2.2,
               children: [
-                _ActionCard(
-                  title: 'Discover',
-                  subtitle: 'Find Mosques',
-                  icon: Icons.travel_explore,
-                  color: const Color(0xFF10B981),
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiscoverMosquesPage())),
-                ),
-                _ActionCard(
-                  title: 'Diagnostics',
-                  subtitle: 'Live Status',
-                  icon: Icons.monitor_heart,
-                  color: Colors.blueAccent,
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiagnosticsPage())),
-                ),
+                if (_isImam) ...[
+                  _ActionCard(
+                    title: 'Register Mosque',
+                    subtitle: 'Add your mosque',
+                    icon: Icons.add_location_alt,
+                    color: const Color(0xFFF59E0B),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const AddMosquePage()),
+                    ),
+                  ),
+                  _ActionCard(
+                    title: 'My Mosque',
+                    subtitle: 'Manage & announce',
+                    icon: Icons.mosque,
+                    color: const Color(0xFF10B981),
+                    onTap: () => MainShell.jumpTo(context, 2),
+                  ),
+                ] else ...[
+                  _ActionCard(
+                    title: 'Discover',
+                    subtitle: 'Find Mosques',
+                    icon: Icons.travel_explore,
+                    color: const Color(0xFF10B981),
+                    onTap: () => MainShell.jumpTo(context, 1),
+                  ),
+                  _ActionCard(
+                    title: 'My Masajid',
+                    subtitle: 'Downloaded mosques',
+                    icon: Icons.bookmark,
+                    color: const Color(0xFF10B981),
+                    onTap: () => MainShell.jumpTo(context, 2),
+                  ),
+                ],
                 _ActionCard(
                   title: 'Calendar',
                   subtitle: 'Islamic Dates',
@@ -549,7 +609,9 @@ class _HomePageState extends State<HomePage> {
                   subtitle: 'Compass',
                   icon: Icons.explore,
                   color: Colors.deepPurpleAccent,
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const QiblaCompassPage())),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const QiblaCompassPage()),
+                  ),
                 ),
               ],
             ),
@@ -703,6 +765,100 @@ class _GlassCard extends StatelessWidget {
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(16),
         child: child,
+      ),
+    );
+  }
+}
+
+/// Prominent hero-style call-to-action card shown on home screen
+/// when a key action is missing (e.g., 0 mosques for Namazi, or
+/// no registered mosque for Imam).
+class _HeroCTA extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String subtitle;
+  final String buttonLabel;
+  final VoidCallback onTap;
+
+  const _HeroCTA({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.subtitle,
+    required this.buttonLabel,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: isDark ? theme.colorScheme.surface.withValues(alpha: 0.8) : theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.5), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: 0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: color, size: 28),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            subtitle,
+            style: TextStyle(
+              fontSize: 13,
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: onTap,
+              icon: Icon(icon, size: 18),
+              label: Text(buttonLabel),
+              style: FilledButton.styleFrom(
+                backgroundColor: color,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

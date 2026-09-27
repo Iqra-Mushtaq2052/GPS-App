@@ -66,7 +66,7 @@ class MosqueForegroundService : Service(), LocationListener {
 
         // Stability & Hysteresis Constants
         const val EXIT_BUFFER_METERS = 30.0f
-        const val MAX_ACCEPTABLE_ACCURACY_METERS = 40.0f
+        const val MAX_ACCEPTABLE_ACCURACY_METERS = 150.0f  // Accept network GPS (100m) + fused fixes
         const val REQUIRED_CONSECUTIVE_EXIT_COUNT = 4
         const val MIN_DWELL_TIME_MS = 45000L // 45 seconds lock on enter
         const val MAX_PLAUSIBLE_SPEED_MPS = 25.0f // 90 km/h

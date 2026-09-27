@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../app_scope.dart';
-import '../home/home_page.dart';
+import '../role/role_selection_page.dart';
 
 class PermissionOnboardingPage extends StatefulWidget {
   const PermissionOnboardingPage({super.key});
@@ -60,8 +61,13 @@ class _PermissionOnboardingPageState extends State<PermissionOnboardingPage>
           setState(() => _step = _Step.done);
         case _Step.done:
           if (mounted) {
+            final scope = AppScope.of(context);
+            final hasRole = await scope.roleService.hasRole();
+            if (!mounted) return;
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const HomePage()),
+              MaterialPageRoute(
+                builder: (_) => hasRole ? const MainShell() : const RoleSelectionPage(),
+              ),
             );
           }
       }
