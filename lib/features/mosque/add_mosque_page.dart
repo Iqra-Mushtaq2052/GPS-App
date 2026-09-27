@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../app_scope.dart';
 import '../../core/auth/auth_service.dart';
@@ -331,6 +333,46 @@ class _AddMosquePageState extends State<AddMosquePage> {
                     ),
                   ),
                 ),
+                
+                if (_capturedPosition != null) ...[
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: SizedBox(
+                      height: 200,
+                      child: FlutterMap(
+                        options: MapOptions(
+                          initialCenter: LatLng(_capturedPosition!.latitude, _capturedPosition!.longitude),
+                          initialZoom: 17,
+                        ),
+                        children: [
+                          TileLayer(
+                            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            userAgentPackageName: 'com.gpsapp.gps_app',
+                          ),
+                          MarkerLayer(
+                            markers: [
+                              Marker(
+                                point: LatLng(_capturedPosition!.latitude, _capturedPosition!.longitude),
+                                width: 40,
+                                height: 40,
+                                child: const Icon(Icons.mosque, color: Color(0xFF10B981), size: 36),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Center(
+                    child: Text(
+                      'Tap map to verify location is correct',
+                      style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurface.withValues(alpha: 0.5)),
+                    ),
+                  ),
+                ],
+
                 const SizedBox(height: 24),
 
                 // ── Geofence Radius ──

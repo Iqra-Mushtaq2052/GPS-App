@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../app_scope.dart';
 import '../../core/supabase/supabase_service.dart';
@@ -87,6 +89,7 @@ class _MosqueDetailPageState extends State<MosqueDetailPage> {
         final name = m?.name ?? cMosque?.name ?? 'Mosque Details';
         final latitude = m?.latitude ?? cMosque?.latitude ?? 0.0;
         final longitude = m?.longitude ?? cMosque?.longitude ?? 0.0;
+        final radiusMeters = m?.radiusMeters ?? cMosque?.radiusMeters ?? 40;
         
         final times = sync.timesFor(cloudId);
         final anns = cloudId == null ? const <CloudAnnouncement>[] : sync.announcementsFor([cloudId]);
@@ -187,6 +190,52 @@ class _MosqueDetailPageState extends State<MosqueDetailPage> {
                             ),
                           ),
                         ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Map section showing mosque location
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: SizedBox(
+                    height: 160,
+                    child: FlutterMap(
+                      options: MapOptions(
+                        initialCenter: LatLng(latitude, longitude),
+                        initialZoom: 16,
+                        interactionOptions: const InteractionOptions(
+                          flags: InteractiveFlag.none, // static, non-interactive
+                        ),
+                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                          userAgentPackageName: 'com.gpsapp.gps_app',
+                        ),
+                        CircleLayer(
+                          circles: [
+                            CircleMarker(
+                              point: LatLng(latitude, longitude),
+                              radius: radiusMeters.toDouble(),
+                              useRadiusInMeter: true,
+                              color: const Color(0xFF10B981).withValues(alpha: 0.15),
+                              borderColor: const Color(0xFF10B981),
+                              borderStrokeWidth: 2,
+                            ),
+                          ],
+                        ),
+                        MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: LatLng(latitude, longitude),
+                              width: 44,
+                              height: 44,
+                              child: const Icon(Icons.mosque, color: Color(0xFF10B981), size: 40),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
                   ),

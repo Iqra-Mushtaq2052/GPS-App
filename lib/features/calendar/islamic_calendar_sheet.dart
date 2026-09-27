@@ -427,9 +427,9 @@ class _IslamicCalendarSheetState extends State<IslamicCalendarSheet> with Single
             physics: const NeverScrollableScrollPhysics(),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 7,
-              mainAxisSpacing: 4,
-              crossAxisSpacing: 4,
-              childAspectRatio: 0.92,
+              mainAxisSpacing: 3,
+              crossAxisSpacing: 3,
+              childAspectRatio: 1.0, // 1:1 square cells prevent overflow
             ),
             itemCount: (firstWeekday - 1) + monthDays.length,
             itemBuilder: (context, index) {
@@ -483,7 +483,7 @@ class _IslamicCalendarSheetState extends State<IslamicCalendarSheet> with Single
                             Text(
                               '${dayObj.day}',
                               style: TextStyle(
-                                fontSize: 13.5,
+                                fontSize: 12,
                                 fontWeight: isSelected || isToday ? FontWeight.bold : FontWeight.w600,
                                 color: isSelected
                                     ? Colors.white
@@ -497,7 +497,7 @@ class _IslamicCalendarSheetState extends State<IslamicCalendarSheet> with Single
                             Text(
                               '${dayObj.gregorianDate.day}',
                               style: TextStyle(
-                                fontSize: 8.5,
+                                fontSize: 7.5,
                                 color: isSelected
                                     ? Colors.white70
                                     : theme.colorScheme.onSurface.withValues(alpha: 0.4),

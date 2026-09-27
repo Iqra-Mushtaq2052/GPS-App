@@ -26,17 +26,22 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
+  double? _debugLat;
+  double? _debugLng;
+  String? _debugDetail; // extra diagnostic info shown in empty state
+
   Future<void> _load() async {
     if (!mounted) return;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _debugDetail = null;
     });
 
     final scope = AppScope.of(context);
     try {
       if (!await scope.location.isLocationServiceEnabled()) {
-        _fail('GPS / Location band hai. Pehle Location on karein.');
+        _fail('GPS / Location is OFF. Please enable Location in phone settings.');
         return;
       }
       var permission = await scope.location.checkPermission();
@@ -45,7 +50,7 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
       }
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        _fail('Qareeb ki masjidein dhoondne ke liye Location permission chahiye.');
+        _fail('Location permission required to search nearby mosques.');
         return;
       }
 
@@ -61,24 +66,46 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
         pos = await scope.location.getQuickPosition();
       }
       if (pos == null) {
-        _fail('GPS position nahi mili. GPS on karke dobara koshish karein.');
+        _fail('Could not get GPS position. Make sure GPS is ON and try again.');
         return;
       }
 
-      final list = await scope.supabaseService.nearbyMosques(
-        latitude: pos.latitude,
-        longitude: pos.longitude,
-        radiusKm: _radiusKm,
-      );
+      // Log GPS coordinates so we can verify the fix is accurate
+      debugPrint('[Discover] GPS fix: lat=${pos.latitude}, lng=${pos.longitude}, acc=${pos.accuracy}m');
+
+      List<StoreMosque> list;
+      try {
+        list = await scope.supabaseService.nearbyMosques(
+          latitude: pos.latitude,
+          longitude: pos.longitude,
+          radiusKm: _radiusKm,
+        );
+        debugPrint('[Discover] RPC returned ${list.length} mosques within ${_radiusKm}km of (${pos.latitude}, ${pos.longitude})');
+      } catch (rpcErr) {
+        debugPrint('[Discover] RPC error: $rpcErr');
+        _fail('Search failed: ${friendlyCloudError(rpcErr)}\n\nRaw: $rpcErr');
+        return;
+      }
 
       if (mounted) {
         setState(() {
           _mosques = list;
           _isLoading = false;
+          _debugLat = pos!.latitude;
+          _debugLng = pos.longitude;
+          _debugDetail = list.isEmpty
+              ? 'Your GPS: ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}\n'
+                  'Search radius: ${_radiusKm}km\n'
+                  'No registered mosques found in this area.\n\n'
+                  'If you just registered a mosque, make sure the PostGIS location trigger ran:\n'
+                  'Run in Supabase SQL Editor:\n'
+                  'UPDATE mosques SET latitude=latitude WHERE imam_user_id=auth.uid();'
+              : null;
         });
       }
     } catch (e) {
-      _fail(friendlyCloudError(e));
+      debugPrint('[Discover] Unexpected error: $e');
+      _fail('Unexpected error: ${friendlyCloudError(e)}');
     }
   }
 
@@ -344,12 +371,20 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
               const Icon(Icons.search_off, size: 64, color: Colors.grey),
               const SizedBox(height: 16),
               Text(
-                'No mosques found within ${_radiusKm.round()} km.\nTry expanding to 10 km.',
+                'No mosques found within ${_radiusKm.round()} km.',
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.grey, fontSize: 16),
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
+              if (_debugLat != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Your GPS: ${_debugLat!.toStringAsFixed(5)}, ${_debugLng!.toStringAsFixed(5)}',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500, fontFamily: 'monospace'),
+                ),
+              ],
               if (_radiusKm < 10.0) ...[
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
                 FilledButton.icon(
                   onPressed: () {
                     setState(() => _radiusKm = 10.0);
@@ -358,6 +393,34 @@ class _DiscoverMosquesPageState extends State<DiscoverMosquesPage> {
                   icon: const Icon(Icons.radar),
                   label: const Text('Expand to 10 km'),
                   style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981)),
+                ),
+              ],
+              if (_debugDetail != null) ...[
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.amber.withValues(alpha: 0.4)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.bug_report, color: Colors.amber, size: 16),
+                          SizedBox(width: 6),
+                          Text('Debug Info', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 13)),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        _debugDetail!,
+                        style: TextStyle(fontSize: 11, color: Colors.grey.shade400, fontFamily: 'monospace'),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ],
