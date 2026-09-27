@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_scope.dart';
 import '../../core/auth/auth_service.dart';
+import '../../core/role/role_service.dart';
 import '../../core/supabase/supabase_service.dart';
 
 /// Login / sign-up for Imam and committee accounts.
@@ -63,6 +64,7 @@ class _ImamAuthPageState extends State<ImamAuthPage> {
       } else {
         await scope.auth.signIn(email: _email.text, password: _password.text);
       }
+      await scope.roleService.setRole(AppRole.imam);
       try {
         await scope.sync.refreshManaged();
       } catch (_) {}

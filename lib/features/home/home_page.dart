@@ -54,7 +54,7 @@ class _HomePageState extends State<HomePage> {
     final enabled = prefs.getBool(_prefsMonitoringEnabledKey) ?? false;
     final serviceOn = await scope.location.isLocationServiceEnabled();
     final mosques = await scope.mosqueRepository.watchAll().first;
-    final isImam = await scope.roleService.isImam();
+    final isImam = (await scope.roleService.isImam()) || scope.auth.isSignedIn;
 
     _mosquesSubscription ??= scope.mosqueRepository.watchAll().listen((mosquesList) {
       NativeProximityBridge.syncMosques(mosquesList);
@@ -139,6 +139,7 @@ class _HomePageState extends State<HomePage> {
     final scope = AppScope.of(context);
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final isImam = _isImam || scope.auth.isSignedIn;
 
     return Scaffold(
       backgroundColor: isDark ? const Color(0xFF0D1117) : theme.scaffoldBackgroundColor,
@@ -176,7 +177,7 @@ class _HomePageState extends State<HomePage> {
                         color: theme.colorScheme.onSurface,
                       ),
                     ),
-                    if (_isImam && scope.auth.fullName != null) ...[
+                    if (isImam && scope.auth.fullName != null) ...[
                       const SizedBox(height: 4),
                       Text(
                         'Imam: ${scope.auth.fullName}',
@@ -508,7 +509,7 @@ class _HomePageState extends State<HomePage> {
                 final mosqueCount = snapshot.data?.length ?? 0;
 
                 // IMAM: show register mosque CTA if no managed mosque yet
-                if (_isImam) {
+                if (isImam) {
                   return ListenableBuilder(
                     listenable: scope.sync,
                     builder: (context, _) {
@@ -559,7 +560,7 @@ class _HomePageState extends State<HomePage> {
               crossAxisSpacing: 12,
               childAspectRatio: 2.2,
               children: [
-                if (_isImam) ...[
+                if (isImam) ...[
                   _ActionCard(
                     title: 'Register Mosque',
                     subtitle: 'Add your mosque',

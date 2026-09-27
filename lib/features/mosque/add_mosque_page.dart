@@ -25,30 +25,27 @@ class _AddMosquePageState extends State<AddMosquePage> {
   bool _isSaving = false;
   String? _error;
 
+  ImamStatus _imamStatus = ImamStatus.none;
+  bool _checkingStatus = true;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _verifyImamRole());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkImamStatus());
   }
 
-  /// Only an admin-approved imam (signed in) may register a mosque.
-  /// The server enforces this again inside register_mosque().
-  Future<void> _verifyImamRole() async {
-    final scope = AppScope.of(context);
-    final status = await scope.auth.refreshStatus();
+  /// Fetch imam approval status and show it INLINE (never silently pop).
+  Future<void> _checkImamStatus() async {
     if (!mounted) return;
-    if (!scope.auth.isSignedIn || status != ImamStatus.approved) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            !scope.auth.isSignedIn
-                ? 'Masjid sirf Imam account se register hoti hai. Pehle login karein.'
-                : 'Aap ka Imam account abhi admin se approve nahi hua. Approval ke baad masjid register kar sakenge.',
-          ),
-          backgroundColor: Colors.orangeAccent,
-        ),
-      );
-      Navigator.of(context).pop();
+    setState(() => _checkingStatus = true);
+    final scope = AppScope.of(context);
+    try {
+      final status = await scope.auth.refreshStatus(createIfMissing: false);
+      debugPrint('[AddMosque] auth.isSignedIn=${scope.auth.isSignedIn}, status=$status');
+      if (mounted) setState(() { _imamStatus = status; _checkingStatus = false; });
+    } catch (e) {
+      debugPrint('[AddMosque] refreshStatus error: $e');
+      if (mounted) setState(() { _imamStatus = ImamStatus.none; _checkingStatus = false; });
     }
   }
 
@@ -102,6 +99,13 @@ class _AddMosquePageState extends State<AddMosquePage> {
 
     final scope = AppScope.of(context);
     try {
+      debugPrint('[AddMosque] Calling register_mosque RPC...');
+      debugPrint('[AddMosque]   name: ${_nameController.text.trim()}');
+      debugPrint('[AddMosque]   lat: ${_capturedPosition!.latitude}, lng: ${_capturedPosition!.longitude}');
+      debugPrint('[AddMosque]   radius: ${_radius.round()}');
+      debugPrint('[AddMosque]   isSignedIn: ${scope.auth.isSignedIn}');
+      debugPrint('[AddMosque]   imamStatus: $_imamStatus');
+
       final cloud = await scope.supabaseService.registerMosque(
         name: _nameController.text.trim(),
         latitude: _capturedPosition!.latitude,
@@ -109,6 +113,7 @@ class _AddMosquePageState extends State<AddMosquePage> {
         radiusMeters: _radius.round(),
         address: _addressController.text.trim(),
       );
+      debugPrint('[AddMosque] RPC SUCCESS! mosque id=${cloud.id}, shareCode=${cloud.shareCode}');
 
       // Imam's phone also gets the mosque (live view + auto-vibrate).
       await scope.mosqueRepository.upsertCloud(
@@ -243,6 +248,119 @@ class _AddMosquePageState extends State<AddMosquePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // ── Imam Status Banner ──
+                if (_checkingStatus)
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Row(
+                      children: [
+                        SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                        SizedBox(width: 12),
+                        Text('Checking Imam account status...'),
+                      ],
+                    ),
+                  )
+                else if (_imamStatus != ImamStatus.approved) ...[
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: (_imamStatus == ImamStatus.none
+                              ? Colors.redAccent
+                              : Colors.orange)
+                          .withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: _imamStatus == ImamStatus.none
+                            ? Colors.redAccent.withValues(alpha: 0.5)
+                            : Colors.orange.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              _imamStatus == ImamStatus.none
+                                  ? Icons.no_accounts
+                                  : _imamStatus == ImamStatus.pending
+                                      ? Icons.hourglass_empty
+                                      : Icons.block,
+                              color: _imamStatus == ImamStatus.none
+                                  ? Colors.redAccent
+                                  : Colors.orange,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                _imamStatus == ImamStatus.none
+                                    ? 'Not signed in as Imam'
+                                    : _imamStatus == ImamStatus.pending
+                                        ? 'Account Pending Approval'
+                                        : 'Account Rejected',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: _imamStatus == ImamStatus.none
+                                      ? Colors.redAccent
+                                      : Colors.orange,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _imamStatus == ImamStatus.none
+                              ? 'Please go to Settings and sign in with your Imam account first.'
+                              : _imamStatus == ImamStatus.pending
+                                  ? 'Your Imam account is waiting for admin approval. Once approved, you can register your mosque.'
+                                  : 'Your Imam account application was rejected. Contact support.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: theme.colorScheme.onSurface.withValues(alpha: 0.8),
+                          ),
+                        ),
+                        if (_imamStatus == ImamStatus.none) ...[
+                          const SizedBox(height: 10),
+                          OutlinedButton.icon(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: const Icon(Icons.arrow_back, size: 16),
+                            label: const Text('Go to Settings to Sign In'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ] else ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.4)),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.verified, color: Color(0xFF10B981), size: 20),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Imam account approved ✓ — you can register your mosque below.',
+                            style: TextStyle(color: Color(0xFF10B981), fontWeight: FontWeight.w600, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
                 // ── Mosque Name ──
                 TextFormField(
                   controller: _nameController,

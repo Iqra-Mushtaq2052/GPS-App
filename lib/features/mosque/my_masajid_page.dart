@@ -4,6 +4,7 @@ import '../../app.dart'; // for MainShell
 import '../../app_scope.dart';
 import '../../core/supabase/supabase_service.dart';
 import '../../data/db/app_database.dart';
+import 'add_mosque_page.dart';
 import 'mosque_detail_page.dart';
 
 class MyMasajidPage extends StatefulWidget {
@@ -102,6 +103,17 @@ class _MyMasajidPageState extends State<MyMasajidPage> {
               ),
             ],
           ),
+          floatingActionButton: isImam
+              ? FloatingActionButton.extended(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const AddMosquePage()),
+                  ),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Register Mosque'),
+                  backgroundColor: const Color(0xFF10B981),
+                  foregroundColor: Colors.white,
+                )
+              : null,
           body: StreamBuilder<List<Mosque>>(
             stream: scope.mosqueRepository.watchAll(),
             builder: (context, snapshot) {
@@ -113,6 +125,52 @@ class _MyMasajidPageState extends State<MyMasajidPage> {
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
+                  if (isImam && managedMosques.isEmpty) ...[
+                    Card(
+                      color: theme.colorScheme.secondary.withValues(alpha: 0.1),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        side: BorderSide(color: theme.colorScheme.secondary.withValues(alpha: 0.4)),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.add_location_alt, color: theme.colorScheme.secondary, size: 28),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Imam Dashboard', style: TextStyle(fontWeight: FontWeight.bold, color: theme.colorScheme.secondary)),
+                                      const SizedBox(height: 2),
+                                      Text('No mosque registered yet under your account.', style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurface.withValues(alpha: 0.7))),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: theme.colorScheme.secondary,
+                                foregroundColor: Colors.black87,
+                                minimumSize: const Size.fromHeight(40),
+                              ),
+                              onPressed: () => Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => const AddMosquePage()),
+                              ),
+                              icon: const Icon(Icons.add, size: 18),
+                              label: const Text('Register Your Mosque Now', style: TextStyle(fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   if (isImam && managedMosques.isNotEmpty) ...[
                     Text(
                       'Managed Mosques (Imam)',

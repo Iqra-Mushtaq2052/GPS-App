@@ -294,8 +294,14 @@ class _QiblaCompassPageState extends State<QiblaCompassPage> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      'This is calculated from your GPS coordinates — no compass sensor needed',
+                      'This is calculated from your GPS coordinates — no compass sensor needed.',
                       style: TextStyle(color: Colors.white54, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                    SizedBox(height: 10),
+                    Text(
+                      '💡 Tip: Face any known direction (e.g. using Google Maps or sunrise/sunset) and rotate until pointing at the shown bearing.',
+                      style: TextStyle(color: Color(0xFFF59E0B), fontSize: 12, height: 1.4),
                       textAlign: TextAlign.center,
                     ),
                   ],

@@ -8,6 +8,7 @@ import '../../core/auth/auth_service.dart';
 import '../../core/ringer/ringer_service.dart';
 import '../auth/imam_auth_page.dart';
 import '../diagnostics/diagnostics_page.dart';
+import '../mosque/add_mosque_page.dart';
 import '../mosque/mosque_detail_page.dart';
 import '../role/role_selection_page.dart';
 
@@ -219,6 +220,21 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                     const SizedBox(height: 16),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(44),
+                        backgroundColor: const Color(0xFF10B981),
+                        foregroundColor: Colors.white,
+                      ),
+                      icon: const Icon(Icons.add_location_alt),
+                      label: const Text('Register My Mosque'),
+                      onPressed: () {
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const AddMosquePage(),
+                        ));
+                      },
+                    ),
+                    const SizedBox(height: 8),
                     if (scope.auth.isApprovedImam)
                       ListenableBuilder(
                         listenable: scope.sync,
